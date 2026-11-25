@@ -1,12 +1,41 @@
-# Ultrafuzz v0.2.0
+# Ultrafuzz v0.2 (experimental)
 
-Ultrafuzz runs a prompt on Modal, collects the agent's report and raw artifacts, and publishes a results PR. One prompt owns the audit strategy, including any native subagents. The runner handles launch, timeouts, one missing-report continuation, collection and publication.
+> **Experimental release (`0.2.0-experimental`).** No live audit run has been made on this runner yet: not on Docker, not on Modal, and not with a real model. The code is covered by offline tests only. Expect failures, and expect the interface to change.
 
-This is a new release with no v0.1 compatibility. It has no workflow graph, Smithers runtime, evaluator, or autoresearch loop. External drivers can use the JSON CLI. The design discussion is [issue #1339](https://github.com/monad-developers/ultrafuzz/issues/1339).
+Ultrafuzz starts one security audit from one prompt and brings the agent's `report.md` back to your machine. A profile supplies the prompt and its skills. The agent harness (Claude Code, OpenCode or Codex) controls the audit and any subagents. The runner does the rest: launch, timeouts, one continuation when the report is missing, collection, and optional publication to GitHub.
 
-## Setup
+The specification is [issue #1342](https://github.com/monad-developers/ultrafuzz/issues/1342). This release has no compatibility with v0.1. It has no workflow graph, no evaluator and no autoresearch loop.
 
-Use Bun, Git, Git LFS (for repositories that use it), the GitHub CLI and a Modal account. Authenticate GitHub on the host with `gh auth login`. Configure Modal through its normal host credentials or `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`.
+## Status
+
+In the code, with offline tests:
+
+- The command line, the configuration file, the run registry and its locks.
+- The Docker executor. Its unit tests use a fake `docker` command. One integration test uses a real Docker Engine and a fake harness; it runs in CI, not in `bun run check`.
+- The worker: prompt delivery, deadlines, one continuation, export. Its tests use fake harness commands.
+- Local collection, redaction and the result package.
+- GitHub publication. Its tests use a local Git remote and a fake `gh` command.
+- Three profiles. The tests check that they load and stage. They do not run them.
+
+Not done:
+
+- No live audit run, on either executor, with any harness or any profile.
+- No test calls Modal. Apart from one small parsing helper, the Modal executor is checked by the type checker only.
+- No publication to a real GitHub repository.
+- Treat the Docker executor as untested on a commit until the `docker` job of the Check workflow passes for that commit.
+
+## Quick start with Docker
+
+Docker is the default executor. You need no cloud account and no GitHub setup for a public target.
+
+You need:
+
+- A Linux x86-64 machine with Docker Engine. Your user must be able to run `docker`. The worker image builds for amd64 only.
+- [Bun](https://bun.sh) 1.3 or later, and Git. Install Git LFS if the target uses it.
+- An OpenRouter API key in an environment variable. All three harnesses use OpenRouter.
+- At least the CPUs and memory that the `[docker]` table asks for (4 CPUs and 8192 MiB in the template). A launch fails when the Docker host has less.
+
+Build and initialize:
 
 ```sh
 bun install
@@ -14,73 +43,123 @@ bun run build
 bun dist/cli.js init
 ```
 
-Edit `~/.ultrafuzz/ultrafuzz.toml`:
+`init` writes `~/.ultrafuzz/ultrafuzz.toml` and copies the profiles to `~/.ultrafuzz/prompts/`. It does not overwrite files that exist. Edit the configuration file. A Docker-only configuration looks like this:
 
 ```toml
 [defaults]
+executor = "docker"
 harness = "opencode"
-model = "provider/model-id" # An OpenRouter model id; choose a model your harness supports.
-audit_profile = "v2/property-specification"
+model = "provider/model-id" # An OpenRouter model ID that your harness supports.
+audit_profile = "v2/property-specification-collaborative"
+# effort = "high"
+
+[docker]
+cpu = 4
+memory_mib = 8192
+timeout_seconds = 21600 # 3600 to 86400.
+# image = "your-image:tag" # Optional. Without it, the package Dockerfile is built.
 
 [openrouter]
 key_env = "OPENROUTER_API_KEY"
 
-[modal]
-app = "ultrafuzz-v2"
-cpu = 4
-memory_mib = 16384
-timeout_seconds = 21600
-# environment = "main"
-# image = "im-..." # Optional prebuilt image with the same tooling.
-
 [repositories.example]
 url = "owner/source-repository"
-results_repository = "owner/private-results-repository"
 # scope = "src/"
+# revision = "a commit, tag or branch" # Optional. The default branch is used without it.
 ```
 
-Set the configured key in your shell environment. All three harnesses—Claude Code, OpenCode and Codex—use OpenRouter. Only that model key enters the worker. GitHub and Modal credentials stay on the host, which clones source and uploads a snapshot. There is no subscription authentication or credential refresh.
+The template also has a `[modal]` table. You can leave it or delete it. Only the table of the selected executor must be present. Without `executor`, Docker is used. If only a `[modal]` table is present, Modal is used. Without `audit_profile`, the profile is `v2/pareto`.
 
-A scoped OpenRouter key with a credit limit per run or per operator is recommended. Ultrafuzz enforces timeouts, not monetary budgets. Network access is unrestricted. Results repositories must be private; minimal credential redaction is not a general data-loss prevention system.
-
-## Run and inspect
+Launch a run, wait for it, and read the report:
 
 ```sh
-bun dist/cli.js launch example --label properties-baseline --json
-bun dist/cli.js status RUN_ID --json
-bun dist/cli.js wait RUN_ID --json
-bun dist/cli.js list --json
-bun dist/cli.js collect RUN_ID --json
-bun dist/cli.js cancel RUN_ID --json
-bun dist/cli.js recover --json
-bun dist/cli.js viewer
+export OPENROUTER_API_KEY=... # your key
+bun dist/cli.js launch example --label first-run
+bun dist/cli.js wait RUN_ID
 ```
 
-`launch` also accepts `--harness`, `--model`, `--effort`, `--profile`, `--timeout` (seconds), and `--key-env`. A label groups repeated configurations; each run still has a unique UTC id such as `20261103-120000-a1b2c3d4`. Each JSON command emits one object with a `schema` field. `status` and `wait` collect and publish terminal runs; failed publication is retried on the next observation. Explicit `collect` republishes idempotently. The client need not remain running after launch.
+`launch` prints the run ID, for example `20261103-120000-a1b2c3d4`. The first launch builds the worker image, and that takes a long time. `launch` returns when the container has started. The run then continues without the command line.
 
-The loopback dashboard lists runs across all configured repositories, launches and cancels runs, and links results PRs. Configuration remains in files. It listens on `127.0.0.1:3000` by default.
+`wait` returns when the run has ended and its results are on your machine. It prints the path of the report:
 
-Use `--home PATH` for an isolated workspace. The default is:
+```text
+~/.ultrafuzz/runs/<run-id>/artifacts/raw/report.md
+```
+
+`status`, `collect` and `list` print the same path. If the run wrote no report, `status`, `wait` and `collect` say so and print the path of the collected evidence instead.
+
+## Commands
+
+Run `bun dist/cli.js --help` for the same list.
+
+| Command | Purpose |
+| --- | --- |
+| `init` | Create the configuration file and install the bundled profiles. |
+| `launch <repository-alias>` | Start a detached run. `--label` is required. |
+| `list` | List local runs. |
+| `status <id>` | Refresh a run. Collect its report if it ended. |
+| `wait <id>` | Wait until a run ends and its report is collected. |
+| `collect <id>` | Collect the local report. Retry publication if it is enabled. |
+| `cancel <id>` | Request a stop, with time to export artifacts. |
+| `recover [id]` | Rebuild local records from the executor's retained storage. |
+| `profiles` | List profiles and their supported harnesses. |
+| `viewer` | Serve the local dashboard on `127.0.0.1`. |
+
+Global options: `--home <directory>`, `--json`, `--help`, `--version`.
+
+| Command | Option | Meaning |
+| --- | --- | --- |
+| `launch` | `--repository <alias>` | Alternative to the positional alias. |
+| `launch` | `--label <name>` | Groups repeated configurations. Letters, digits, dots, underscores and hyphens. |
+| `launch` | `--profile <name>` | Profile name. The default is `audit_profile` in the configuration, or `v2/pareto` without it. |
+| `launch` | `--executor <name>` | `docker` or `modal`. The default is `executor` in the configuration. |
+| `launch` | `--revision <ref>` | Commit, tag or branch to audit. The default is `revision` of the repository in the configuration, or the default branch. |
+| `launch` | `--publish` | Also open a pull request in the results repository. |
+| `launch` | `--harness <name>` | `claude-code`, `opencode` or `codex`. |
+| `launch` | `--model <provider/model>` | OpenRouter model ID. |
+| `launch` | `--effort <value>` | Reasoning effort of the harness. |
+| `launch` | `--properties <file\|run-id>` | A property-specification report, as a file or a collected run. |
+| `launch` | `--key-env <name>` | Environment variable that holds the key for this run. |
+| `launch` | `--timeout <seconds>` | Timeout for this run, 3600 to 86400. |
+| `launch` | `--input <name=path\|JSON>` | A named file, directory or repository input. Repeatable. |
+| `launch` | `--inputs <file.json>` | A JSON array of input records. |
+| `collect` | `--force` | Download and package again. |
+| `recover` | `--executor <name>` | The executor whose storage is read. |
+| `viewer` | `--port <number>` | The default is 3000. |
+
+With `--json`, each command prints one JSON object with a `schema` field. `wait` and `collect` exit with code 1 when collection failed, or when a requested publication failed. A failed audit is not a failed command.
+
+`status` and `wait` collect a run that has ended. A failed collection or publication is tried again on the next `status`, `wait` or `collect`. Plain `collect` does nothing when the run is already collected and, if publication is on, published.
+
+A launch can fail before the run reaches the executor, for example when Docker is not installed or the clone fails. Such a run is recorded as failed. It has nothing to collect, and `status` prints the cause. If a launch is killed while it prepares the run, the record stays in the state `prepared`. Use `cancel` and then `status` to end it.
+
+The dashboard lists the runs of all configured repositories. It can launch and cancel runs, and it links the local report. It listens only on `127.0.0.1`.
+
+`--home <directory>` or the `ULTRAFUZZ_HOME` variable selects another workspace. The default layout is:
 
 ```text
 ~/.ultrafuzz/
   ultrafuzz.toml
   prompts/v2/<profile>/
-  runs/<run-id>/run.json
-  runs/<run-id>/staging/
-  runs/<run-id>/collected/
-  runs/<run-id>/artifacts/
+  runs/<run-id>/run.json      the run record
+  runs/<run-id>/staging/      what was sent to the worker
+  runs/<run-id>/collected/    the raw download
+  runs/<run-id>/artifacts/    the result package, with raw/report.md
 ```
-
-Registry writes are atomic, under a short per-run lock. Observation and publication use a separate operation lock. Each run stores a secret-free record on its Modal Volume. `recover [RUN_ID]` restores missing local records from those Volumes, then `status` collects the results. Volumes are never deleted automatically. A driver interrupted during submission can reconcile the named sandbox with `status`; do not create a replacement run until its state is known.
 
 ## Profiles and inputs
 
-| Profile | Deliverable | Input |
-| --- | --- | --- |
-| `v2/pareto` | `report.md` | Source repository; optional `threat-model` input. OpenCode only. Work in progress. |
-| `v2/property-specification` | `report.md`, with stable property IDs | Source repository |
-| `v2/stateful-fuzzing` | `report.md` | Explicit existing properties report |
+| Profile | What it does | Harnesses | Inputs |
+| --- | --- | --- | --- |
+| `v2/pareto` | Pareto v2 security review: many independent hunters, merges, verification and appeals. Work in progress. | `opencode` | The source. Optional `threat-model` input. |
+| `v2/property-specification-collaborative` | Eight lenses each write a property catalog and share one log file. A fan-in merges the catalogs into `report.md` with stable IDs (`P-001`, ...). Work in progress. | `claude-code`, `opencode`, `codex` | The source. Optional offline copies of the pinned references. |
+| `v2/stateful-fuzzing` | Implements the supplied properties and runs a bounded stateful fuzzing campaign. | `claude-code`, `opencode`, `codex` | The source and a properties report (`--properties`, required). |
+
+None of the three has been run live on this runner. The only deliverable of each profile is `report.md`. A launch with a harness that the profile does not list fails before execution.
+
+**Property specification.** Each lens studies one or two external references, pinned by repository and commit. The profile does not contain their text. A lens downloads them during the run. To supply one offline, pass a snapshot of its repository as an input with the reference ID as its name, for example `--input reference-properties-crytic=./crytic-properties`. The IDs are in `skills/property-specification-collaborative/references.md` in the profile. When the harness can start subagents, the lenses run as subagents in two groups of four. Otherwise they run one after another in the same session.
+
+**Stateful fuzzing.** `--properties` takes a file or the ID of a collected run. The report is copied into the new run as an input named `properties`, and the runner records its hash and its source run. The runner never starts property specification by itself. The prompt receives a suggested fuzzing budget of `min(4 hours, initial harness time / 3)`. This is guidance for the agent, not a limit that the runner enforces.
 
 ```sh
 bun dist/cli.js launch example --label fuzz-baseline \
@@ -91,27 +170,29 @@ bun dist/cli.js launch example --label fuzz-custom \
   --input reference=./supporting-notes
 ```
 
-`--properties` accepts a file or a collected v0.2 run id. It is copied as an input named `properties`; the runner records its hash and source run. It never launches property specification automatically. Other inputs use the same mechanism, from a local path or repository snapshot. Input references are read-only to the harness.
+**Inputs.** `--input name=path` adds a local file or directory. A JSON object adds a repository snapshot: `--input '{"name":"reference","repository":"https://github.com/org/repo","revision":"main"}'`. The harness sees each input read-only at `/run-data/reference/<name>`.
 
-A profile directory contains `profile.json`, `prompt.mdx`, `skills/` and optional native configuration under `config/`. `config/claude-code.json`, `config/opencode.json` and `config/codex.toml` are merged over generated harness configuration. Named subagents belong in those native configurations. The runner does not interpret their orchestration. Supported harnesses are declared in `profile.json`; incompatible launches fail before execution. MDX is submitted as text, not executed as JavaScript.
+**Profile files.** A profile directory holds `profile.json`, `prompt.mdx`, `skills/` and optional harness configuration under `config/`. `config/claude-code.json`, `config/opencode.json` and `config/codex.toml` are merged over the configuration that the runner generates. `config/opencode.env.json` and `config/claude-code.env.json` hold harness flags as strings. Extra harness files go in `files/<harness>/`. The prompt is sent as text. It is not executed.
 
-Additional native files go in `files/<harness>/`, which is copied into that harness's isolated configuration directory (for example, `files/claude-code/agents/reviewer.md`). Optional `config/opencode.env.json` and `config/claude-code.env.json` hold string-valued native flags such as `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX` or `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`. Claude fan-out profiles should set the latter to `"1"`; it is not a global default because it also disables background Bash. Credentials, configuration paths and provider routing remain generated by the runner.
+**A profile is trusted.** The runner generates the harness configuration: the model, the OpenRouter route and the permissions. A profile's `config/` file is merged over it and can replace any of these values. A changed route can send the OpenRouter key to another endpoint. Only the `*.env.json` files are restricted: they cannot set credentials or configuration paths. Read a profile before you install it, as you read code before you run it.
 
-`init` copies packaged profiles into the central prompts directory without overwriting existing files. New profile versions use new names. The run records the package version, profile name and digest of the actual installed profile/configuration/plugin files, which are also published under `raw/profile/`. Only bundled/profile skills are registered; audited repository agent customizations are excluded. Property guidance is original text linking to external references, without vendoring their licensed source.
+The run records the package version, the profile name and a digest of the installed profile files. Agent customization files in the audited repository, such as `CLAUDE.md` and `AGENTS.md`, are not loaded.
+
+`init` does not overwrite installed profiles. If `~/.ultrafuzz/prompts` holds profiles from an earlier checkout, delete that directory and run `init` again.
 
 ### Pareto v2 (work in progress)
 
-`v2/pareto` is available for OpenCode only. **There is no live run of this profile on this runner yet. Expect failures.**
+`v2/pareto` is set up for OpenCode only, with the model `deepseek/deepseek-v4.1-flash-1017`. **There is no live run of this profile on this runner yet. Expect failures.**
 
 The profile contains the Pareto v2 workflow from [Can open-weight models achieve frontier security performance?](https://www.monad.xyz/blog/can-open-weight-models-achieve-frontier-security-performance):
 
 - `prompt.mdx`: the initial prompt for the coordinating session.
-- `skills/pareto-security-review/prompts/`: the six role prompts (coordinator, hunter, batch merger, final merger, verifier and appeal). Their text is the same as in the article, except that placeholders use double braces.
+- `skills/pareto-security-review/prompts/`: the six role prompts (coordinator, hunter, batch merger, final merger, verifier and appeal).
 - `skills/pareto-security-review/scripts/`: `render.py` prepares the run and renders the hunt, verify and appeal tasks. `pareto_tools.py` checks merge coverage, splits candidates into shards and assembles the report. The scripts use only the Python 3.11 standard library and do not call a model.
 - `skills/pareto-security-review/config.toml`: the defaults. They are 86 hunters, 20 shards with two verifiers each, and six appeal reviewers.
 - `config/opencode.env.json`: the 131,072-token output limit that the workflow requests.
 
-The workflow was measured with OpenCode and DeepSeek V4.1 Flash 1017 at maximum reasoning effort. It requests 16 CPUs, 64 GiB of memory and a 24-hour limit. The runner defaults are much smaller, and a profile cannot change them. Set them in `~/.ultrafuzz/ultrafuzz.toml` before you launch:
+The workflow requests 16 CPUs, 64 GiB of memory and a 24-hour limit, with maximum reasoning effort. The runner defaults are much smaller, and a profile cannot change them. Set them in `~/.ultrafuzz/ultrafuzz.toml` before you launch. The Docker host must have that many CPUs and that much memory.
 
 ```toml
 [defaults]
@@ -119,7 +200,7 @@ harness = "opencode"
 model = "deepseek/deepseek-v4.1-flash-1017"
 effort = "max"
 
-[modal]
+[docker] # Use the same three values under [modal] for the Modal executor.
 cpu = 16
 memory_mib = 65536
 timeout_seconds = 86400
@@ -130,66 +211,189 @@ bun dist/cli.js launch example --label pareto-v2 \
   --profile v2/pareto --input threat-model=./threat-model.md
 ```
 
-The `threat-model` input is optional. Without it, the coordinating session writes a threat model from the project's documentation and says so in the report. The measured runs received a threat model, so supply one when you can.
+The `threat-model` input is optional. Without it, the coordinating session writes a threat model from the project's documentation and says so in the report.
 
-`init` does not overwrite installed profiles. If `~/.ultrafuzz/prompts/v2/pareto` is from an earlier checkout, delete that directory and run `init` again.
+## Example launches
 
-The offline tests for the Python tools run with `bun run check`, or directly:
+These are three small public repositories: one Foundry project, one Hardhat project and one Vyper project. The commands below are correct for the code, but these launches have not been run.
 
-```sh
-python3 -m unittest discover -s profiles/v2/pareto/skills/pareto-security-review/tests
+Each entry pins the commit to audit with `revision`. Without `revision`, the runner clones the default branch. The run record shows the commit in both cases. Add the three repositories to `~/.ultrafuzz/ultrafuzz.toml`:
+
+```toml
+[repositories.very-liquid-vaults] # Foundry
+url = "rheo-xyz/very-liquid-vaults"
+revision = "e50384709a696c86ab0440bbbc3dd14a5f4ff6ec"
+
+[repositories.venus] # Hardhat
+url = "code-423n4/2023-05-venus"
+revision = "9853f6f4fe906b635e214b22de9f627c6a17ba5b"
+
+[repositories.stableswap-ng] # Vyper
+url = "curvefi/stableswap-ng"
+revision = "8c78731ed43c22e6bcdcb5d39b0a7d02f8cb0386"
 ```
 
-Profiles write `report.md` only when finished. Intermediate notes go elsewhere. Stateful fuzzing receives a suggested wall-clock fuzzing budget of `min(4h, initial harness time / 3)` in its preamble; this is guidance for the prompt.
+Launch a property specification on each target. Set `model` in the configuration first, or add `--model`.
+
+```sh
+bun dist/cli.js launch very-liquid-vaults --label properties --profile v2/property-specification-collaborative
+bun dist/cli.js launch venus --label properties --profile v2/property-specification-collaborative
+bun dist/cli.js launch stableswap-ng --label properties --profile v2/property-specification-collaborative
+bun dist/cli.js list
+bun dist/cli.js wait RUN_ID
+```
+
+Then use the report of a finished run as the input of a fuzzing run:
+
+```sh
+bun dist/cli.js launch very-liquid-vaults --label fuzz \
+  --profile v2/stateful-fuzzing --properties RUN_ID
+```
+
+Each run uses the CPUs and memory of the `[docker]` table at the same time as the others. On a small machine, launch one run and wait for it before you launch the next.
+
+`--revision <ref>` on `launch` overrides the configured revision for one run. The image has tools for Solidity projects only, so expect a weaker result on the Vyper target.
+
+## Executors
+
+A run keeps the executor that it was launched on. `status`, `wait`, `collect` and `cancel` use the executor in the run record.
+
+### Docker (default)
+
+Each run has one detached container and one named volume. Both are named `ultrafuzz-<run-id>` and carry the label `ultrafuzz.run=<run-id>`. The volume is the only mount of the container. The container gets no host directory and no Docker socket, and it is not privileged. Its network is not restricted.
+
+Read these points before you use it:
+
+- **The key is readable through Docker.** The OpenRouter key is in the environment of the container. Anyone who can use Docker on that machine can read it, for example with `docker inspect`. It stays there after the run ended, until you remove the container. Use a key with a spending limit.
+- **Nothing is deleted automatically.** The container, the volume, the worker image and the local files of every run stay until you remove them.
+- **The first image build takes a long time.** Without `image` under `[docker]`, the first launch builds the package Dockerfile as `ultrafuzz-worker:<hash>`. Later launches use that image again. With `image` set, that image is used as it is, and it is pulled when it is absent.
+- **A run does not survive the host.** The container continues when the command line exits. It does not continue after a host restart or a stop of the Docker daemon. `recover` rebuilds local records from retained volumes. It does not continue an audit.
+
+List what Ultrafuzz left in Docker:
+
+```sh
+docker ps -a --filter label=ultrafuzz.run
+docker volume ls --filter label=ultrafuzz.run
+docker image ls --filter label=ultrafuzz.dockerfile
+```
+
+List and remove the container and the volume of one run. Replace `RUN_ID`.
+
+```sh
+docker ps -a --filter label=ultrafuzz.run=RUN_ID
+docker volume ls --filter label=ultrafuzz.run=RUN_ID
+docker rm ultrafuzz-RUN_ID          # The container, with its copy of the key.
+docker volume rm ultrafuzz-RUN_ID   # The outputs of the run in Docker. Collect first.
+```
+
+Remove the container before the volume. `docker rm` refuses a container that is still running. After a run has ended you can remove its container and keep its volume: `status`, `collect` and `recover` then read the volume through a short-lived container that is never started. This needs the worker image. The local files of a run are in `~/.ultrafuzz/runs/<run-id>/`.
+
+A custom image must provide `sh`, `mkdir`, `cp`, `touch`, `sync`, a GNU-style `timeout`, `bun` and the harness. The container is created with `--init`, so the Docker host must provide `docker-init`.
+
+### Modal
+
+The Modal executor is in the code. It has not been run live with this release, and no test calls Modal. Select it with `executor = "modal"` under `[defaults]`, or with `--executor modal` for one run. It needs a `[modal]` table and Modal credentials on the host.
+
+```toml
+[modal]
+app = "ultrafuzz"
+cpu = 4
+memory_mib = 8192
+timeout_seconds = 21600
+# environment = "main"
+# image = "im-..." # Optional: a Modal image ID or a registry image.
+```
+
+Each run has one Modal sandbox and one Modal Volume, both named with the run ID. Without `image`, Modal builds the image from the instructions of the package Dockerfile, so the host needs no Docker. The key enters the sandbox as a Modal secret. Volumes are never deleted automatically.
+
+## Credentials and limits
+
+Only the OpenRouter key enters the worker. GitHub and Modal credentials stay on the host. The host clones the source and sends a snapshot to the worker. A public target needs no login. A private GitHub target over HTTPS uses the credentials of the GitHub CLI, so run `gh auth login` on the host first.
+
+Ultrafuzz enforces timeouts. It does not enforce a spending limit, so use an OpenRouter key that has one. The network of the worker is not restricted.
 
 ## Completion and timeouts
 
-The sandbox timeout includes setup, execution, continuation and export. The minimum is one hour. The initial harness deadline is 30 minutes before the sandbox deadline; continuation stops 10 minutes before it. Every phase uses the same absolute deadline.
+The timeout covers source setup in the worker, the harness, the continuation and the export. It starts when the worker is started, after the image build and the upload. The minimum is one hour and the maximum is 24 hours. The first harness call must end 30 minutes before the deadline. The continuation must end 10 minutes before it.
 
-If the harness exits without a nonempty `report.md`, Ultrafuzz sends exactly one continuation to the same native session when a session id exists, the run was not cancelled, and at least five useful minutes remain. The continuation asks the agent to finish its original task and write the report. There is no manual resume/nudge command or Codex stop hook. Cancel sends SIGTERM, allowing export, with a five-minute hard-stop grace period.
+If the harness exits without a nonempty `report.md`, Ultrafuzz sends one continuation message to the same harness session. It does this only when a session ID exists, the run was not cancelled, and at least five minutes remain for it. The message asks the agent to finish its task and write the report. There is no manual resume command.
 
-`status: succeeded` means a nonempty report exists. `end` and `exit_code` separately describe execution, so a cancelled run can still have a delivered report. Missing usage or unknown estimated cost does not fail delivery. Costs are estimates with provenance, not invoices.
+`cancel` asks the worker to stop and gives it five minutes to export. After that the worker is killed. Each executor also stops a worker that runs past its deadline.
 
-The OpenCode task guard remains a temporary workaround for empty/truncated native subagent results. It continues the affected child at most twice before reporting failure. It does not require tool calls or named reviewers. Removal depends on an upstream fix and a successful Pareto acceptance run; see [upstream #52378](https://github.com/anomalyco/opencode/issues/52378) and [#59051](https://github.com/anomalyco/opencode/issues/59051).
+`status: succeeded` means that a nonempty report exists. `end` and `exit_code` describe the execution separately, so a cancelled run can still have a report. A run with missing usage data can still succeed.
 
-For comparable experiments, the automatic continuation is the only additional message. Operator prompts, forks, extra continuations, handed-over files or raised limits change the experiment; the runner does not police this policy.
+The OpenCode task guard is a temporary workaround for empty or truncated subagent results. It continues the affected subagent at most two times and then reports a failure. See [upstream issue 52378](https://github.com/anomalyco/opencode/issues/52378) and [upstream issue 59051](https://github.com/anomalyco/opencode/issues/59051).
 
-## Results
+For comparable experiments, the automatic continuation is the only extra message. Operator prompts, extra continuations, handed-over files or raised limits change the experiment. The runner does not check this.
 
-Each run opens or reopens branch `ultrafuzz/<run-id>` in its configured private results repository, under `attempts/<label>/runs/<run-id>/`:
+## Result package
+
+Collection downloads the worker's outputs to `runs/<run-id>/collected/` and writes the result package to `runs/<run-id>/artifacts/`:
 
 ```text
 run.yml
 usage.yml
 prompt.txt
 raw/report.md
-raw/agents/
 raw/transcript.jsonl
 raw/sessions/
 raw/profile/
+raw/agents/       when the run wrote them
+raw/workspace/    when the run wrote them
 ```
 
-`run.yml` records source and actual cloned commit, profile/configuration digest, harness/version/model/effort, times, continuation, outcome and omissions. `usage.yml` records available tokens, estimated cost and its provenance. The source commit is recorded for traceability; the runner does not enforce a pinned revision.
+`run.yml` records the source and the cloned commit, the profile digest, the harness, its version, the model and the effort, the times, the continuation, the outcome and the omissions. `usage.yml` records the token counts and the cost estimate that were available, with the source of the estimate.
 
-Publication builds on the remote branch, replaces only its owned files, preserves files added by external tools, and never force-pushes. Text over 10 MiB is gzipped. Limits are 50 MiB per file and 200 MiB per run. Optional workspace output is trimmed first; corpus directories are excluded. Every omission is recorded. Reports, transcripts and profile/session evidence cannot be silently dropped: exceeding their limits fails publication, while original output remains on the Volume.
+The package holds text files only. Text over 10 MiB is compressed with gzip. The limits are 50 MiB for one file and 200 MiB for one run. Optional workspace output is removed first, and fuzzing corpus directories are always left out. Every omission is recorded. If the report, a transcript, or session or profile evidence does not fit, collection fails. The original outputs stay in the run's volume.
 
-Redaction replaces known secret values and positively identified credential patterns, including validated BIP39 mnemonics, labeled private keys, Google API keys, Modal tokens and JWTs. Common development mnemonics and Anvil keys are allowed. There are no entropy scans, artifact sealing or signing protocols.
+Redaction replaces the known secret values and some credential patterns that it can identify, such as valid BIP39 mnemonics, labelled private keys and JWTs. Common development mnemonics and the default Anvil keys are kept. This is not a general protection against data leaks.
 
-## Development and release validation
+## Optional GitHub publication
+
+Publication is off by default. A run without it needs no GitHub setup. Publication has not been run against a real GitHub repository with this release.
+
+To turn it on:
+
+1. Authenticate the GitHub CLI on the host with `gh auth login`.
+2. Set `results_repository = "owner/name"` under the repository in `ultrafuzz.toml`. The repository must be private and must have a default branch.
+3. Launch with `--publish`, or tick the checkbox in the dashboard.
+
+`--publish` without a results repository is refused before launch. Publication is decided at launch. There is no command that publishes a run that was launched without it.
+
+A published run has the branch `ultrafuzz/<run-id>` and one pull request. The result package is copied to `attempts/<label>/runs/<run-id>/`. Publication replaces only the files that it wrote before, keeps files that other tools added, and never force-pushes. A failed publication does not start a new download or a new audit. The next `status`, `wait` or `collect` tries it again from the local package.
+
+## Not included in the experimental release
+
+The specification describes these items. This release does not have them:
+
+- Installable plugin packages and the plugin commands. The executors and the publisher are part of this package.
+- Direct OpenAI and Anthropic API routes. All harnesses use OpenRouter.
+- ChatGPT and Claude subscription routes.
+- The retention plugin and the cleanup command. Remove storage by hand, as shown above.
+- Launch retry with a request ID.
+- The `config`, `show`, `logs`, `publish` and `watch` commands.
+- The extra outcome states. A run has `state`, `status` and `end` only.
+- Pareto v2 on Claude Code and Codex.
+
+## Development and tests
 
 ```sh
 bun run check
 ```
 
-The small test suite exercises lifecycle decisions, local Git publication, profile/input handling and stubbed harness processes. It does not substitute for live acceptance. The release PR must record a run id and results-PR link for each check on a small public source repository:
+`check` runs the type checker, the unit tests (`bun test`), the Python tests of the Pareto tools and the build. It needs Bun, Git and Python 3.11 or later. It needs no Docker, no Modal account and no key. You can also run the Pareto tests alone:
 
-- Each harness and each available profile.
-- A full Pareto v2 run.
-- A deliberately missing report, including continuation after a timeout kill for Claude Code and Codex.
-- Cancellation mid-run.
-- Client exit after launch followed by detached collection.
-- Publication failure followed by retry.
-- Local registry removal followed by recovery from Modal.
-- Chimera/recon smoke check on the pinned Foundry toolchain.
+```sh
+bun run test:pareto
+```
 
-Autoresearch and evaluation live outside this package and can consume its CLI and result directories.
+The Docker integration test needs a real Docker Engine. It builds a small test image with a fake harness, clones one public repository, calls no model and uses no secret. It removes the containers and volumes of its own runs and leaves the test image on the host.
+
+```sh
+bun run build
+bun run test:docker
+```
+
+Two GitHub workflows run in CI. `Check` runs `bun run check` and, in a second job, the Docker integration test. `Worker image` builds the real worker image with `docker build` and runs each pinned tool in it. It runs on a pull request that changes the Dockerfile, and on request.
+
+These tests do not replace live runs. The acceptance list in section 12 of the specification is still open.

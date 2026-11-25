@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, createReadStream, chmodSync, chownSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants, createReadStream, chmodSync, chownSync, cpSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { dirname, join, resolve, relative } from "node:path";
 import { x as extractTar } from "tar";
@@ -57,18 +57,23 @@ function readOnlyInputs(path: string): void {
   chmodSync(path, stat.isDirectory() ? 0o555 : 0o444);
   if (stat.isDirectory()) for (const name of readdirSync(path)) readOnlyInputs(join(path, name));
 }
+/**
+ * Open a log for appending. The worker can be root, and the harness user owns the directory. A link at the
+ * path is refused, so code that the harness runs cannot point the write at another file, such as the completion record.
+ */
+const openLog = (path: string) => openSync(path, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o644);
 function signalGroup(child: ChildProcess, signal: NodeJS.Signals): void {
   if (!child.pid) return;
   try { process.kill(-child.pid, signal); } catch { /* Already gone. */ }
 }
 /** Keep a trailing key-length window so a credential split across chunks never reaches disk. */
-function redactingSink(path: string, key: string, onRedaction: (count: number) => void) {
+function redactingSink(file: number, key: string, onRedaction: (count: number) => void) {
   const decoder = new StringDecoder("utf8");
   let pending = "";
   const flush = (final: boolean) => {
     if (key) { const parts = pending.split(key); onRedaction(parts.length - 1); pending = parts.join("[REDACTED]"); }
     const count = final ? pending.length : Math.max(0, pending.length - Math.max(0, key.length - 1));
-    if (count) appendFileSync(path, pending.slice(0, count));
+    if (count) appendFileSync(file, pending.slice(0, count));
     pending = pending.slice(count);
   };
   return { write: (chunk: Buffer) => { pending += decoder.write(chunk); flush(false); }, end: () => { pending += decoder.end(); flush(true); } };
@@ -96,12 +101,19 @@ export async function runInvocation(context: HarnessContext, prompt: string, cut
 }): Promise<InvocationResult> {
   if (Date.now() >= cutoff || options.cancelled()) return { code: null, timedOut: Date.now() >= cutoff };
   const command = harnessCommand(context, options.sessionId);
-  const child = spawn(command[0]!, command.slice(1), {
-    cwd: context.workspace, env: context.env, detached: true, stdio: ["pipe", "pipe", "pipe"],
-    ...(process.getuid?.() === 0 ? { uid: 10001, gid: 10001 } : {}),
-  });
+  // Both logs are open before the harness starts and are written through their descriptors, so a later
+  // swap of the path changes nothing.
+  const logs = ["transcript.jsonl", "stderr.log"].map(name => openLog(join(context.raw, name)));
+  const closeLogs = () => { for (const file of logs.splice(0)) closeSync(file); };
+  const [transcript, stderr] = logs as [number, number];
+  let child: ChildProcess;
+  try {
+    child = spawn(command[0]!, command.slice(1), {
+      cwd: context.workspace, env: context.env, detached: true, stdio: ["pipe", "pipe", "pipe"],
+      ...(process.getuid?.() === 0 ? { uid: 10001, gid: 10001 } : {}),
+    });
+  } catch (error) { closeLogs(); throw error; }
   options.onChild?.(child);
-  const transcript = join(context.raw, "transcript.jsonl"), stderr = join(context.raw, "stderr.log");
   const stdoutSink = redactingSink(transcript, context.env.OPENROUTER_API_KEY ?? "", options.onRedaction ?? (() => {}));
   const stderrSink = redactingSink(stderr, context.env.OPENROUTER_API_KEY ?? "", options.onRedaction ?? (() => {}));
   const eventDecoder = new StringDecoder("utf8");
@@ -132,10 +144,10 @@ export async function runInvocation(context: HarnessContext, prompt: string, cut
       signalGroup(child, "SIGTERM");
       setTimeout(() => signalGroup(child, "SIGKILL"), 1_000).unref();
     });
-    child.once("error", (error) => { clearInterval(poll); options.onChild?.(null); reject(error); });
+    child.once("error", (error) => { clearInterval(poll); options.onChild?.(null); closeLogs(); reject(error); });
     child.once("close", (code) => {
       clearInterval(poll); options.onChild?.(null);
-      stdoutSink.end(); stderrSink.end(); pending += eventDecoder.end();
+      stdoutSink.end(); stderrSink.end(); closeLogs(); pending += eventDecoder.end();
       if (pending.trim()) { try { const event = JSON.parse(pending); if (isObject(event)) options.onEvent(event); } catch {} }
       resolvePromise({ code, timedOut });
     });
@@ -143,7 +155,7 @@ export async function runInvocation(context: HarnessContext, prompt: string, cut
 }
 
 function workspaceFiles(workspace: string): string[] {
-  // Heavy caches/corpora stay on the Volume; the publisher receives generated source and evidence.
+  // Heavy caches/corpora stay in the run's store; the collector receives generated source and evidence.
   const excluded = new Set([".git", "node_modules"]);
   const walk = (root: string): string[] => readdirSync(root).flatMap((name) => {
     if (excluded.has(name)) return [];
@@ -164,13 +176,17 @@ export async function runWorker(root: string): Promise<RunRecord> {
   let plan: Deadlines | undefined;
   const events: Record<string, any>[] = [], baseline = new Map<string, string>();
   const save = () => atomicJson(join(root, "run.json"), JSON.parse(redactText(JSON.stringify(record), [key]).text));
-  const log = (message: string) => appendFileSync(join(raw, "worker.log"), `${now()} ${redactText(message, [key]).text}\n`);
+  // Best effort: a log line must never stop the worker before it writes the completion record.
+  const log = (message: string) => {
+    try { const file = openLog(join(raw, "worker.log")); try { appendFileSync(file, `${now()} ${redactText(message, [key]).text}\n`); } finally { closeSync(file); } }
+    catch { /* The run record carries the error as well. */ }
+  };
   const cancel = () => { cancelled = true; if (active) signalGroup(active, "SIGTERM"); };
   process.on("SIGTERM", cancel); process.on("SIGINT", cancel);
   const heartbeat = setInterval(() => { if (existsSync(join(root, "cancelled"))) cancel(); record.last_observed_at = now(); save(); }, 10_000);
   heartbeat.unref();
   try {
-    plan = deadlines(Date.now(), Date.parse(job.deadline_at), job.record.modal.timeout_seconds * 1000);
+    plan = deadlines(Date.now(), Date.parse(job.deadline_at), job.record.executor.timeout_seconds * 1000);
     if (existsSync(job.prompt_path)) cpSync(job.prompt_path, join(job.output_dir, "prompt.txt"));
     copyDirectory(job.profile_dir, join(raw, "profile"));
     if (cancelled) throw new Error("Cancelled before harness launch");
@@ -226,28 +242,32 @@ export async function runWorker(root: string): Promise<RunRecord> {
     record.usage = usageFromEvents(record.harness.name, events);
     if (context) {
       try { record.usage = await exportSessions(context, Math.min(plan?.export ?? Date.now() + minute, Date.now() + (cancelled ? 4 : 8) * minute), (path, reason) => record.omitted.push({ path, reason })) ?? record.usage; }
-      catch (error) { log(`Session export incomplete; native state retained on Volume: ${String(error)}`); record.omitted.push({ path: "raw/sessions", reason: "Native export failed; state retained on the Modal Volume" }); }
+      catch (error) { log(`Session export incomplete; native state retained in the run store: ${String(error)}`); record.omitted.push({ path: "raw/sessions", reason: "Native export failed; state retained in the run store" }); }
       if (record.session_id && ![...files(join(raw, "sessions"))].length) record.omitted.push({ path: "raw/sessions", reason: "Native session files unavailable; transcript retained" });
       try {
         for (const path of workspaceFiles(job.workspace)) {
           const name = relative(job.workspace, path);
           if (baseline.get(name) === digest(path)) continue;
           if (name.split("/").some((part) => ["corpus", "corpus-replay", "cache", "cache_forge", "out", "artifacts"].includes(part))) {
-            record.omitted.push({ path: `raw/workspace/${name}`, reason: "Generated cache/corpus retained on the Modal Volume" });
+            record.omitted.push({ path: `raw/workspace/${name}`, reason: "Generated cache/corpus retained in the run store" });
             continue;
           }
           const destination = join(raw, "workspace", name);
           mkdirSync(dirname(destination), { recursive: true }); cpSync(path, destination);
         }
         copyDirectory(join(job.workspace, "agents"), join(raw, "agents"));
-      } catch (error) { log(`Workspace export incomplete; source remains on Volume: ${String(error)}`); }
+      } catch (error) { log(`Workspace export incomplete; source remains in the run store: ${String(error)}`); }
     }
     record.state = "finished"; record.status = nonemptyReport(report) ? "succeeded" : "failed";
     if (cancelled) record.end = "cancelled";
     record.finished_at = now(); record.last_observed_at = now();
     if (!nonemptyReport(report) && !record.error) record.error = "report.md is missing or empty";
     try { record.redactions = (record.redactions ?? 0) + await redactDirectory(job.output_dir, [key]); }
-    catch (error) { record.error = `Output redaction failed: ${String(error)}`; record.publication.state = "failed"; }
+    catch (error) {
+      // A collection problem, not a publication one. The collector redacts again before it packages.
+      record.error = `Output redaction failed: ${String(error)}`;
+      record.collection = { ...record.collection, state: "failed", error: record.error };
+    }
     if (existsSync(join(raw, "profile"))) record.profile.sha256 = profileDigest(join(raw, "profile"));
     const sanitized = JSON.parse(redactText(JSON.stringify(record), [key]).text) as RunRecord;
     Object.assign(record, sanitized);
@@ -256,7 +276,9 @@ export async function runWorker(root: string): Promise<RunRecord> {
     save();
     const sync = async () => {
       const result = await captureCommand(["sync", "-f", root], { workspace: root, env: { PATH: process.env.PATH ?? "/usr/bin:/bin" } }, Math.max(1, Math.min(10_000, (plan?.export ?? Date.now() + 10_000) - Date.now())));
-      if (result.code !== 0) throw new Error(`Unable to synchronize run output: ${result.stderr || "deadline reached"}`);
+      // The sync covers the whole file system of the store, so a busy disk can make it slow. A slow or failed
+      // sync must not cost the completion record: without it the host loses the usage and session data of the run.
+      if (result.code !== 0) log(`Unable to synchronize run output: ${result.stderr || "deadline reached"}`);
     };
     try {
       // Synchronize the mounted filesystem before exposing completion, then persist the marker itself.

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
-import type { RunRecord } from "./types";
+import { EXECUTORS, type RunRecord } from "./types";
 
 export function validateRunId(id: string): void {
   if (!/^\d{8}-\d{6}-[a-f0-9]{8}$/.test(id)) throw new Error(`Invalid run ID: ${id}`);
@@ -26,7 +26,9 @@ function validateRecord(value: unknown, id: string): asserts value is RunRecord 
     || !["pending", "succeeded", "failed"].includes(record.status)
     || typeof record.label !== "string" || typeof record.created_at !== "string"
     || !record.source || typeof record.source.repository !== "string"
-    || !record.publication || !record.usage) throw new Error(`Invalid run record: ${id}`);
+    || !record.publication || !record.usage
+    || !record.executor || !EXECUTORS.includes(record.executor.name) || typeof record.executor.volume_name !== "string"
+    || !record.collection || !["pending", "collected", "failed"].includes(record.collection.state)) throw new Error(`Invalid run record: ${id}`);
 }
 
 export async function readRun(home: string, id: string): Promise<RunRecord> {

@@ -28,7 +28,8 @@ function record(): RunRecord {
     created_at: "2026-11-03T12:00:00Z", started_at: "2026-11-03T12:00:01Z", finished_at: "2026-11-03T12:10:00Z",
     last_observed_at: null, session_id: "session-1", continuation: null, inputs: [], omitted: [],
     usage: { input_tokens: 10, output_tokens: 20, cost_usd: null, cost_provenance: "unknown" },
-    modal: { app: "ultrafuzz", cpu: 1, memory_mib: 1024, timeout_seconds: 3600, sandbox_id: "sb-1", volume_name: "volume-1" },
+    executor: { name: "modal", app: "ultrafuzz", cpu: 1, memory_mib: 1024, timeout_seconds: 3600, runtime_id: "sb-1", volume_name: "volume-1" },
+    collection: { state: "pending", path: null, report: null },
     publication: { state: "pending", repository: "example/results", branch: "ultrafuzz/20261103-120000-aabbccdd", path: "attempts/baseline/runs/20261103-120000-aabbccdd", pr_url: null },
   };
 }
@@ -108,7 +109,7 @@ test("a rejected mandatory artifact leaves previous bundle and original output i
   expect((await readFile(join(source, "raw/report.md"))).length).toBe(3);
 });
 
-test("recollection metadata is stable across observation and publication updates", async () => {
+test("recollection metadata is stable across observation, collection and publication updates", async () => {
   const { source, destination } = await fixture();
   const run = record();
   await prepareArtifacts(source, destination, run);
@@ -116,8 +117,13 @@ test("recollection metadata is stable across observation and publication updates
   run.last_observed_at = "2026-11-03T14:00:00Z";
   run.publication.state = "published";
   run.publication.pr_url = "https://github.com/example/results/pull/1";
+  // Host paths belong to the local record only; the package must not carry them.
+  run.collection = { state: "collected", path: "/home/operator/.ultrafuzz/runs/x/artifacts", report: "/home/operator/.ultrafuzz/runs/x/artifacts/raw/report.md" };
   await prepareArtifacts(source, destination, run);
   expect(await readFile(join(destination, "run.yml"), "utf8")).toBe(before);
+  expect(before).not.toContain("/home/operator");
+  expect(parse(before).executor).toEqual(run.executor);
+  expect(parse(before).collection).toBeUndefined();
 });
 
 test("redaction covers artifact paths, omission paths and run metadata", async () => {

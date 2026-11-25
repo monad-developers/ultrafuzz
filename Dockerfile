@@ -1,5 +1,6 @@
-# Ultrafuzz builds this image with Modal; no registry or Docker daemon is
-# required on the host. Runtime inputs and model credentials are separate.
+# The worker image. The Docker executor builds this file with docker build.
+# The Modal executor builds the same instructions on Modal, without a Docker
+# daemon on the host. Runtime inputs and model credentials are separate.
 FROM node:22.23.4-bookworm-slim
 
 ARG OPENCODE_VERSION=1.19.3
@@ -36,8 +37,8 @@ RUN npm install --global "bun@${BUN_VERSION}" "opencode-ai@${OPENCODE_VERSION}" 
     && test "$(codex --version)" = "codex-cli ${CODEX_VERSION}" \
     && test "$(bun --version)" = "${BUN_VERSION}"
 
-# Modal sandboxes use linux/amd64. Verify the pinned upstream release archive
-# before installing its binaries (no mutable foundryup installer).
+# The pinned tools are linux/amd64 builds. Verify the pinned upstream release
+# archive before installing its binaries (no mutable foundryup installer).
 RUN test "$(dpkg --print-architecture)" = amd64 \
     && curl --fail --location --retry 3 \
        "https://github.com/foundry-rs/foundry/releases/download/v${FOUNDRY_VERSION}/foundry_v${FOUNDRY_VERSION}_linux_amd64.tar.gz" \

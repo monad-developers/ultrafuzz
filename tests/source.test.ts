@@ -68,6 +68,11 @@ test("recursive submodules are included and dependency revisions resolve indepen
     expect(await readFile(join(root, "source/workspace/lib/child/library.txt"), "utf8")).toBe("library\n");
     const dependency = await prepareDependency(repo, old, join(root, "dependency"));
     expect(dependency.commit).toBe(old);
+    // A target can be pinned too: the audited source is the named revision, not the default-branch head.
+    const pinned = await prepareSource(repo, undefined, join(root, "pinned"), old);
+    expect(pinned.commit).toBe(old);
+    expect(await readFile(join(root, "pinned/workspace/version.txt"), "utf8")).toBe("old\n");
+    await expect(prepareSource(repo, undefined, join(root, "bad"), "--upload-pack=x")).rejects.toThrow("Invalid repository revision");
     expect(await readFile(join(dependency.checkout, "version.txt"), "utf8")).toBe("old\n");
     expect((await readdir(join(dependency.checkout, "lib/child"))).includes(".git")).toBe(false);
   });

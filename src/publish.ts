@@ -112,6 +112,7 @@ async function pullRequests(repository: string, branch: string, cwd: string): Pr
 export async function publishRun(record: RunRecord, artifactDir: string, options: { cwd?: string } = {}): Promise<{ pr_url: string }> {
   const cwd = options.cwd ?? process.cwd();
   const repository = record.publication.repository;
+  if (!repository) throw new Error("No results repository is recorded for this run. Set results_repository in ultrafuzz.toml and launch with --publish.");
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(repository)) throw new Error("Results repository must be owner/name");
   if (![record.id, record.label].every((value) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) && value !== "..")) throw new Error("Unsafe run id or label");
   const branch = `ultrafuzz/${record.id}`, root = `attempts/${record.label}/runs/${record.id}`;

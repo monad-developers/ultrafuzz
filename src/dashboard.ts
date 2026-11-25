@@ -1,7 +1,9 @@
-import { resolve } from "node:path";
-import { createEngine } from "./engine";
+import { join, resolve } from "node:path";
+import { createEngine, settled, type Publisher } from "./engine";
 import { loadConfig } from "./config";
+import type { ExecutorSource } from "./executor";
 import { listProfiles } from "./profiles";
+import { validateRunId } from "./store";
 import type { LaunchOptions, RunRecord } from "./types";
 
 const webRoot = resolve(import.meta.dir, "../web");
@@ -16,9 +18,10 @@ const headers = {
 };
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers });
 
-export async function serveDashboard(home: string, port = 3000): Promise<void> {
+/** Returns a function that stops the server. `executors` and `publisher` replace the real ones in tests. */
+export async function serveDashboard(home: string, port = 3000, executors?: ExecutorSource, publisher?: Publisher): Promise<() => void> {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Dashboard port must be between 1 and 65535.");
-  const engine = await createEngine(home);
+  const engine = await createEngine(home, executors, publisher);
   // Avoid overlapping collectors when multiple browser tabs poll at once.
   let refresh: Promise<RunRecord[]> | undefined;
   const runs = () => refresh ??= (async () => {
@@ -27,7 +30,7 @@ export async function serveDashboard(home: string, port = 3000): Promise<void> {
     for (let index = 0; index < records.length; index += 4) {
       const batch = records.slice(index, index + 4);
       const observed = await Promise.allSettled(batch.map(async record =>
-        record.state !== "finished" || record.publication.state !== "published" ? await engine.status(record.id) : record));
+        settled(record) ? record : await engine.status(record.id)));
       updates.push(...observed.map((result, offset) => result.status === "fulfilled" ? result.value : batch[offset]!));
     }
     return updates;
@@ -57,12 +60,19 @@ export async function serveDashboard(home: string, port = 3000): Promise<void> {
         if (url.pathname === "/api/runs" && request.method === "POST") {
           const body = await request.json() as LaunchOptions;
           // The form reloads config on page load, so launches must use that config too.
-          const current = await createEngine(home);
+          const current = await createEngine(home, executors, publisher);
           return json({ run: await current.launch(body) }, 201);
         }
-        const route = /^\/api\/runs\/([a-zA-Z0-9_-]+)(\/cancel)?$/.exec(url.pathname);
+        const route = /^\/api\/runs\/([a-zA-Z0-9_-]+)(\/cancel|\/report)?$/.exec(url.pathname);
         if (route && request.method === "GET" && !route[2]) return json({ run: await engine.status(route[1]!) });
-        if (route && request.method === "POST" && route[2]) return json({ run: await engine.cancel(route[1]!) });
+        if (route && request.method === "POST" && route[2] === "/cancel") return json({ run: await engine.cancel(route[1]!) });
+        if (route && request.method === "GET" && route[2] === "/report") {
+          // The path is rebuilt from the validated run ID, never taken from a stored record.
+          validateRunId(route[1]!);
+          const report = Bun.file(join(resolve(home), "runs", route[1]!, "artifacts/raw/report.md"));
+          if (await report.exists()) return new Response(report, { headers: { ...headers, "Content-Type": "text/plain; charset=utf-8" } });
+          return json({ error: "This run has no collected report." }, 404);
+        }
         if (request.method === "GET" && assets[url.pathname]) {
           const file = Bun.file(resolve(webRoot, assets[url.pathname]!));
           if (await file.exists()) return new Response(file, { headers });
@@ -77,7 +87,8 @@ export async function serveDashboard(home: string, port = 3000): Promise<void> {
     void runs().catch(() => process.stderr.write("Ultrafuzz dashboard could not refresh the run registry.\n"));
   }, 5000);
   process.stderr.write(`Ultrafuzz dashboard: http://127.0.0.1:${server.port}\n`);
-  const stop = () => { clearInterval(collector); server.stop(true); };
+  const stop = () => { clearInterval(collector); process.off("SIGINT", stop); process.off("SIGTERM", stop); void server.stop(true); };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
+  return stop;
 }

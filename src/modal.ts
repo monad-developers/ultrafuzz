@@ -1,27 +1,23 @@
-import { cp, mkdir, readFile, readdir, readlink, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, readlink } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ModalClient, NotFoundError, SandboxFilesystemNotFoundError, type Sandbox } from "modal";
-import type { ModalConfig, RunRecord, WorkerJob } from "./types";
+import { RUN_ROOT, WORKER_COMMAND, stageRuntime, startingJob, storedRecord, type Executor, type Observation } from "./executor";
+import type { Config, ExecutorRecord, ModalConfig, RunRecord } from "./types";
 
 const ROOT = resolve(import.meta.dir, "..");
-const remote = "/run-data";
+const remote = RUN_ROOT;
 const missing = (error: unknown) => error instanceof NotFoundError || error instanceof SandboxFilesystemNotFoundError;
-export interface Observation { code: number | null | undefined; sandbox_id?: string; complete: RunRecord | null }
-export interface RunCloud {
-  launch(record: RunRecord, staging: string, key: string): Promise<string>;
-  observe(record: RunRecord): Promise<Observation>;
-  download(record: RunRecord, destination: string): Promise<RunRecord["omitted"]>;
-  cancel(record: RunRecord): Promise<void>;
-  recover(config: ModalConfig, id?: string): Promise<RunRecord[]>;
+type ModalRecord = Extract<ExecutorRecord, { name: "modal" }>;
+function handles(record: RunRecord): ModalRecord {
+  if (record.executor.name !== "modal") throw new Error(`Run ${record.id} belongs to the ${record.executor.name} executor, not Modal.`);
+  return record.executor;
 }
 
 async function json(sandbox: Sandbox, path: string): Promise<RunRecord | null> {
   try {
     const info = await sandbox.filesystem.stat(path);
     if (info.type !== "file" || info.size > 16 * 1024 * 1024) throw new Error("Invalid remote run record");
-    const record = JSON.parse(await sandbox.filesystem.readText(path));
-    if (record.schema !== "ultrafuzz.run.v2" || !/^\d{8}-\d{6}-[a-f0-9]{8}$/.test(record.id)) throw new Error("Invalid v0.2 run record");
-    return record;
+    return storedRecord(await sandbox.filesystem.readText(path));
   } catch (error) { if (missing(error)) return null; throw error; }
 }
 
@@ -42,11 +38,12 @@ async function upload(sandbox: Sandbox, local: string, target: string, root = lo
 }
 
 async function find(client: ModalClient, record: RunRecord): Promise<Sandbox> {
-  return record.modal.sandbox_id ? client.sandboxes.fromId(record.modal.sandbox_id)
-    : client.sandboxes.fromName(record.modal.app, record.id, { environment: record.modal.environment, includeTerminated: true });
+  const modal = handles(record);
+  return modal.runtime_id ? client.sandboxes.fromId(modal.runtime_id)
+    : client.sandboxes.fromName(modal.app, record.id, { environment: modal.environment, includeTerminated: true });
 }
 
-async function volume<T>(client: ModalClient, config: ModalConfig, name: string, write: boolean,
+async function volume<T>(client: ModalClient, config: Pick<ModalConfig, "app" | "environment">, name: string, write: boolean,
   callback: (sandbox: Sandbox) => Promise<T>, create = false): Promise<T> {
   const mounted = await client.volumes.fromName(name, { environment: config.environment, createIfMissing: create, version: 2 });
   const app = await client.apps.fromName(config.app, { environment: config.environment, createIfMissing: true });
@@ -67,17 +64,8 @@ export function dockerInstructions(text: string): { base: string; commands: stri
   return { base: from.slice(5).trim(), commands };
 }
 
-async function runtime(staging: string): Promise<void> {
-  const destination = join(staging, "runtime");
-  await mkdir(destination, { recursive: true });
-  const bundled = join(ROOT, "dist/worker.js");
-  if (!(await stat(bundled).catch(() => null))?.isFile()) throw new Error("Worker bundle missing. Run bun run build before launching.");
-  await cp(bundled, join(destination, "worker.js"));
-  await cp(join(ROOT, "plugins"), join(destination, "plugins"), { recursive: true });
-}
-
 /** Small Modal adapter. Only the OpenRouter key enters the worker's environment. */
-export class ModalCloud implements RunCloud {
+export class ModalExecutor implements Executor {
   private async connected<T>(fn: (client: ModalClient) => Promise<T>): Promise<T> {
     const client = new ModalClient();
     try { return await fn(client); } finally { client.close(); }
@@ -85,20 +73,16 @@ export class ModalCloud implements RunCloud {
 
   async launch(record: RunRecord, staging: string, key: string): Promise<string> {
     return this.connected(async client => {
-      const config = record.modal;
+      const config = handles(record);
       const app = await client.apps.fromName(config.app, { environment: config.environment, createIfMissing: true });
       const specification = dockerInstructions(await readFile(join(ROOT, "Dockerfile"), "utf8"));
       const image = await (config.image
         ? config.image.startsWith("im-") ? await client.images.fromId(config.image) : client.images.fromRegistry(config.image)
         : client.images.fromRegistry(specification.base).dockerfileCommands(specification.commands)).build(app);
-      await runtime(staging);
+      await stageRuntime(staging);
       await volume(client, config, config.volume_name, true, async sandbox => {
         await upload(sandbox, staging, remote);
-        // The deadline starts after image building and upload; all worker stages share it.
-        const job = JSON.parse(await readFile(join(staging, "job.json"), "utf8")) as WorkerJob;
-        job.deadline_at = new Date(Date.now() + config.timeout_seconds * 1000).toISOString();
-        job.record.started_at = new Date().toISOString();
-        job.record.state = "launching";
+        const job = await startingJob(staging, config.timeout_seconds);
         await sandbox.filesystem.writeText(JSON.stringify(job), `${remote}/job.json`);
         await sandbox.filesystem.writeText(JSON.stringify(job.record), `${remote}/run.json`);
         const sync = await sandbox.exec(["sync", remote]);
@@ -107,7 +91,7 @@ export class ModalCloud implements RunCloud {
       const mounted = await client.volumes.fromName(config.volume_name, { environment: config.environment });
       const sandbox = await client.sandboxes.create(app, image, {
         name: record.id, runtime: "vm",
-        command: ["sh", "-c", "mkdir -p /opt/ultrafuzz && cp -R /run-data/runtime/. /opt/ultrafuzz/ && exec bun /opt/ultrafuzz/worker.js --root /run-data"],
+        command: WORKER_COMMAND,
         volumes: { [remote]: mounted }, secrets: [await client.secrets.fromObject({ OPENROUTER_API_KEY: key })],
         cpu: config.cpu, memoryMiB: config.memory_mib, timeoutMs: config.timeout_seconds * 1000,
       });
@@ -123,16 +107,16 @@ export class ModalCloud implements RunCloud {
       let complete: RunRecord | null = null;
       if (code === null && sandbox) complete = await json(sandbox, `${remote}/complete.json`);
       else {
-        try { complete = await volume(client, record.modal, record.modal.volume_name, false, sb => json(sb, `${remote}/complete.json`)); }
+        try { complete = await volume(client, handles(record), record.executor.volume_name, false, sb => json(sb, `${remote}/complete.json`)); }
         catch (error) { if (!missing(error)) throw error; }
       }
       if (complete && complete.id !== record.id) throw new Error("Completion record belongs to another run");
-      return { code, sandbox_id: sandbox?.sandboxId, complete };
+      return { code, runtime_id: sandbox?.sandboxId, complete };
     });
   }
 
   async download(record: RunRecord, destination: string): Promise<RunRecord["omitted"]> {
-    return this.connected(client => volume(client, record.modal, record.modal.volume_name, false, async sandbox => {
+    return this.connected(client => volume(client, handles(record), record.executor.volume_name, false, async sandbox => {
       const omitted: RunRecord["omitted"] = [];
       await mkdir(destination, { recursive: true });
       async function walk(path: string, local: string, prefix: string): Promise<void> {
@@ -163,7 +147,9 @@ export class ModalCloud implements RunCloud {
     });
   }
 
-  async recover(config: ModalConfig, id?: string): Promise<RunRecord[]> {
+  async recover(settings: Config, id?: string): Promise<RunRecord[]> {
+    const config = settings.modal;
+    if (!config) throw new Error("Executor modal is not configured. Add a [modal] table to ultrafuzz.toml.");
     return this.connected(async client => {
       const names: string[] = [];
       if (id) names.push(id);
@@ -181,8 +167,15 @@ export class ModalCloud implements RunCloud {
       }
       const records: RunRecord[] = [];
       for (const name of names) {
-        const record = await volume(client, config, name, false, async sandbox => await json(sandbox, `${remote}/complete.json`) ?? await json(sandbox, `${remote}/run.json`));
-        if (record && record.id === name) records.push(record);
+        let record: RunRecord | null;
+        try { record = await volume(client, config, name, false, async sandbox => await json(sandbox, `${remote}/complete.json`) ?? await json(sandbox, `${remote}/run.json`)); }
+        catch (error) {
+          // One unreadable store must not hide the others. A named run still fails loudly.
+          if (id || !(error instanceof Error) || !error.message.startsWith("Invalid ")) throw error;
+          process.stderr.write(`Skipped Modal Volume ${name}: ${error.message}\n`);
+          continue;
+        }
+        if (record && record.id === name && record.executor.name === "modal") records.push(record);
       }
       return records;
     });

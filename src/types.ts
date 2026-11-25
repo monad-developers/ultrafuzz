@@ -1,25 +1,38 @@
-export const VERSION = "0.2.0";
+/** Keep this equal to the version in package.json. A test checks it. */
+export const VERSION = "0.2.0-experimental";
 export const HARNESSES = ["claude-code", "opencode", "codex"] as const;
 export type Harness = (typeof HARNESSES)[number];
 
+export const EXECUTORS = ["docker", "modal"] as const;
+export type ExecutorName = (typeof EXECUTORS)[number];
+
 export interface RepositoryConfig {
   url: string;
-  results_repository: string;
+  /** Optional: only needed for runs launched with publication enabled. */
+  results_repository?: string;
   scope?: string;
+  /** Optional commit, tag or branch to audit. Without it the default branch is cloned. */
+  revision?: string;
 }
 
-export interface ModalConfig {
-  app: string;
-  environment?: string;
-  image?: string;
+/** Settings every executor shares. The timeout covers continuation and export time. */
+export interface ExecutorResources {
   cpu: number;
   memory_mib: number;
   timeout_seconds: number;
+  image?: string;
+}
+export type DockerConfig = ExecutorResources;
+export interface ModalConfig extends ExecutorResources {
+  app: string;
+  environment?: string;
 }
 
 export interface Config {
-  defaults: { harness: Harness; model: string; effort?: string; audit_profile: string };
-  modal: ModalConfig;
+  defaults: { executor: ExecutorName; harness: Harness; model: string; effort?: string; audit_profile: string };
+  /** Only the table of the selected executor is required. */
+  docker?: DockerConfig;
+  modal?: ModalConfig;
   openrouter: { key_env: string };
   repositories: Record<string, RepositoryConfig>;
 }
@@ -77,10 +90,12 @@ export interface RunRecord {
   omitted: Array<{ path: string; reason: string }>;
   redactions?: number;
   usage: Usage;
-  modal: ModalConfig & { sandbox_id: string | null; volume_name: string };
+  executor: ExecutorRecord;
+  collection: Collection;
   publication: {
-    state: "pending" | "published" | "failed";
-    repository: string;
+    /** "disabled" is the normal state of a local-only run. */
+    state: "disabled" | "pending" | "published" | "failed";
+    repository: string | null;
     branch: string;
     path: string;
     pr_url: string | null;
@@ -89,7 +104,31 @@ export interface RunRecord {
   error?: string;
 }
 
-// This file is staged on the per-run Volume. Credentials are never part of it.
+/** Local collection outcome. It is kept apart from the optional publication outcome. */
+export interface Collection {
+  state: "pending" | "collected" | "failed";
+  /**
+   * Absolute local directory of the collected package, once one exists.
+   * "collected" with a null path means that the run never reached the executor, so nothing exists to collect.
+   */
+  path: string | null;
+  /** Absolute local path of a nonempty report.md inside the package, or null. */
+  report: string | null;
+  error?: string;
+}
+
+/** Resolved resources and stable handles of the executor that owns a run. */
+interface ExecutorHandles extends ExecutorResources {
+  /** The per-run durable store: a Modal Volume or a named Docker volume. */
+  volume_name: string;
+  /** Modal sandbox ID or Docker container ID. It is null until the executor reports it. */
+  runtime_id: string | null;
+}
+export type ExecutorRecord =
+  | (ExecutorHandles & { name: "modal"; app: string; environment?: string })
+  | (ExecutorHandles & { name: "docker"; container_name: string });
+
+// This file is staged in the per-run durable store. Credentials are never part of it.
 export interface WorkerJob {
   record: RunRecord;
   deadline_at: string;
@@ -104,6 +143,11 @@ export interface LaunchOptions {
   repository: string;
   label: string;
   audit_profile?: string;
+  executor?: ExecutorName;
+  /** Commit, tag or branch to audit; overrides the repository's configured revision. */
+  revision?: string;
+  /** Publication is off unless this is true. */
+  publish?: boolean;
   harness?: Harness;
   model?: string;
   effort?: string;

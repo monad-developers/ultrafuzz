@@ -149,11 +149,11 @@ function excluded(path: string): string | null {
   return null;
 }
 
-function publicationError(path: string, reason: string): Error {
-  return new Error(`Cannot publish mandatory artifact ${path}: ${reason}. Original outputs remain on the run Volume.`);
+function packageError(path: string, reason: string): Error {
+  return new Error(`Cannot package mandatory artifact ${path}: ${reason}. Original outputs remain in the run store.`);
 }
 
-/** Stage a sanitized, bounded publication bundle. Source outputs are never modified. */
+/** Stage the sanitized, bounded local package. An enabled publisher copies it. Source outputs are never modified. */
 export async function prepareArtifacts(
   sourceDir: string,
   destDir: string,
@@ -185,7 +185,7 @@ export async function prepareArtifacts(
       const required = mandatory(entry.path);
       const reason = entry.kind !== "file" ? `${entry.kind} excluded` : excluded(entry.path);
       if (reason) {
-        if (required) throw publicationError(entry.path, reason);
+        if (required) throw packageError(entry.path, reason);
         omit(entry.path, reason);
         continue;
       }
@@ -194,13 +194,13 @@ export async function prepareArtifacts(
       if (wasGzip) {
         try { bytes = gunzipSync(bytes); }
         catch {
-          if (required) throw publicationError(entry.path, "invalid gzip data");
+          if (required) throw packageError(entry.path, "invalid gzip data");
           omit(entry.path, "unreadable gzip artifact");
           continue;
         }
       }
       if (!isText(bytes)) {
-        if (required) throw publicationError(entry.path, "not valid UTF-8 text");
+        if (required) throw packageError(entry.path, "not valid UTF-8 text");
         omit(entry.path, "binary artifact excluded");
         continue;
       }
@@ -211,11 +211,11 @@ export async function prepareArtifacts(
       const output = gzip && !wasGzip ? `${safeName.text}.gz` : safeName.text;
       if (gzip) bytes = gzipSync(bytes);
       if (bytes.length > FILE_LIMIT) {
-        if (required) throw publicationError(entry.path, "exceeds the 50 MiB file limit after compression");
+        if (required) throw packageError(entry.path, "exceeds the 50 MiB file limit after compression");
         omit(entry.path, "exceeds 50 MiB after compression");
         continue;
       }
-      if (candidates.some((candidate) => candidate.output === output)) throw publicationError(entry.path, `compressed path collides with ${output}`);
+      if (candidates.some((candidate) => candidate.output === output)) throw packageError(entry.path, `compressed path collides with ${output}`);
       await mkdir(dirname(join(stage, output)), { recursive: true });
       await writeFile(join(stage, output), bytes, { mode: 0o600 });
       candidates.push({ path: entry.path, output, size: bytes.length, required, workspace: optionalWorkspace(entry.path) });
@@ -225,14 +225,15 @@ export async function prepareArtifacts(
     const trimmable = candidates.filter((candidate) => !candidate.required).sort((a, b) => Number(b.workspace) - Number(a.workspace) || b.size - a.size);
     for (;;) {
       omitted.sort((a, b) => a.path.localeCompare(b.path));
-      // Local observation/publication fields change on every collection, while the
-      // result describes the execution. Keeping them out makes recollection stable.
-      const { publication, last_observed_at, usage: _usage, ...execution } = record;
+      // Local observation, collection and publication fields change on every collection
+      // and hold host paths, while the result describes the execution. Keeping them out
+      // makes recollection stable.
+      const { publication, collection, last_observed_at, usage: _usage, ...execution } = record;
       const preliminary = redactText(stringify({ ...execution, omitted, redactions: (record.redactions ?? 0) + redactions }), secrets);
       const usage = redactText(stringify(record.usage), secrets);
       const run = redactText(stringify({ ...execution, omitted, redactions: (record.redactions ?? 0) + redactions + preliminary.count + usage.count }), secrets);
       const metadataSize = Buffer.byteLength(run.text) + Buffer.byteLength(usage.text);
-      if (metadataSize > FILE_LIMIT) throw publicationError("run.yml / usage.yml", "metadata exceeds the 50 MiB file limit");
+      if (metadataSize > FILE_LIMIT) throw packageError("run.yml / usage.yml", "metadata exceeds the 50 MiB file limit");
       if (total + metadataSize <= RUN_LIMIT) {
         redactions += run.count + usage.count;
         await writeFile(join(stage, "run.yml"), run.text, { mode: 0o600 });
@@ -240,7 +241,7 @@ export async function prepareArtifacts(
         break;
       }
       const victim = trimmable.shift();
-      if (!victim) throw publicationError("report, transcripts and run metadata", "exceed the 200 MiB run limit together");
+      if (!victim) throw packageError("report, transcripts and run metadata", "exceed the 200 MiB run limit together");
       await rm(join(stage, victim.output));
       total -= victim.size;
       omit(victim.path, "trimmed to fit the 200 MiB run limit");

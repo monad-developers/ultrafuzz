@@ -51,7 +51,9 @@ export async function loadProfile(name: string, harness?: Harness): Promise<Prof
   let current = root;
   for (const part of name.split("/")) {
     current = join(current, part);
-    if ((await lstat(current)).isSymbolicLink()) throw new Error(`Profile symlinks are unsupported: ${name}`);
+    const info = await lstat(current).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
+    if (!info) throw new Error(`Unknown profile ${name}. Run ultrafuzz profiles to list the installed profiles.`);
+    if (info.isSymbolicLink()) throw new Error(`Profile symlinks are unsupported: ${name}`);
   }
   const profile = await metadata(directory, name);
   if (!profile.available) throw new Error(`Profile ${name} is unavailable: its prompt is still TBD.`);

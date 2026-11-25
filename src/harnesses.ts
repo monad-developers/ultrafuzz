@@ -194,10 +194,10 @@ export async function exportSessions(context: HarnessContext, deadline: number, 
     parts = (database.query("SELECT data FROM part").all() as { data: string }[]).map((row) => JSON.parse(row.data)).filter((part) => part.type === "step-finish");
   } finally { database.close(); }
   for (const id of ids) {
-    if (Date.now() >= deadline || !/^[a-zA-Z0-9_-]+$/.test(id)) { omitted(`raw/sessions/${id}.json`, "Session export unavailable; native database retained on the Modal Volume"); continue; }
+    if (Date.now() >= deadline || !/^[a-zA-Z0-9_-]+$/.test(id)) { omitted(`raw/sessions/${id}.json`, "Session export unavailable; native database retained in the run store"); continue; }
     const output = await captureCommand([context.executable, "export", id], context, Math.min(30_000, deadline - Date.now()));
     if (output.code === 0) write(join(destination, `${id}.json`), redactText(output.stdout, [context.env.OPENROUTER_API_KEY!]).text);
-    else omitted(`raw/sessions/${id}.json`, "Session export failed; native database retained on the Modal Volume");
+    else omitted(`raw/sessions/${id}.json`, "Session export failed; native database retained in the run store");
   }
   return opencodeStepUsage(parts, "OpenCode native completed step-finish.cost across all sessions; estimate, unfinished steps may be absent");
 }

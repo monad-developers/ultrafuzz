@@ -1,6 +1,6 @@
 "use strict";
 const $ = id => document.getElementById(id);
-let profiles = [], records = [], launching = false, pollInFlight = false;
+let profiles = [], repositories = {}, records = [], launching = false, pollInFlight = false;
 const harnessNames = { "claude-code": "Claude Code", opencode: "OpenCode", codex: "Codex" };
 const node = (tag, text, className) => {
   const element = document.createElement(tag);
@@ -31,6 +31,8 @@ function updateProfile() {
   $("properties-field").hidden = !profile?.requires_properties;
   $("properties").required = !!profile?.requires_properties;
   $("launch").disabled = launching || !profile?.available || !$("repository").value;
+  // Publication is optional and needs a results repository in the local config.
+  $("publish-field").hidden = !repositories[$("repository").value]?.results_repository;
 }
 function updateHarness(preferred) {
   const previous = preferred || $("profile").value;
@@ -74,9 +76,17 @@ function renderRuns() {
         const url = new URL(run.publication.pr_url);
         if (url.protocol === "https:") { const link = node("a", "Results ↗", "result-link"); link.href = url.href; link.target = "_blank"; link.rel = "noopener noreferrer"; actions.append(link); }
       } catch { /* A malformed URL must not become a clickable action. */ }
-    } else if (run.state === "finished") {
+    } else if (run.state === "finished" && run.publication.state !== "disabled") {
+      // No pull request is normal for a local-only run, so only enabled publication is shown.
       const publication = node("span", run.publication.state === "failed" ? "Publish retry pending" : "Publishing…", "end-label");
       publication.title = run.publication.error || "Results publication is retried during collection."; actions.append(publication);
+    }
+    if (run.collection.report) {
+      const link = node("a", "Report", "result-link"); link.href = `/api/runs/${encodeURIComponent(run.id)}/report`; link.target = "_blank"; link.rel = "noopener noreferrer";
+      link.title = run.collection.report; actions.append(link);
+    } else if (run.state === "finished") {
+      const collection = node("span", run.collection.state === "collected" ? "No report" : run.collection.state === "failed" ? "Collection failed" : "Collecting…", "end-label");
+      collection.title = run.collection.error || run.collection.path || run.error || "The report is collected to this machine."; actions.append(collection);
     }
     if (run.state !== "finished") {
       const button = node("button", "Cancel", "cancel"); button.type = "button";
@@ -103,6 +113,7 @@ $("launch-form").addEventListener("submit", async event => {
   try {
     const body = Object.fromEntries(new FormData(event.currentTarget));
     if (!body.effort) delete body.effort;
+    body.publish = body.publish === "on" && !$("publish-field").hidden;
     if (!profiles.find(profile => profile.name === body.audit_profile)?.requires_properties) delete body.properties;
     const { run } = await api("/api/runs", { method: "POST", body: JSON.stringify(body) });
     notice(`Run launched: ${run.id}. It continues when this page is closed.`); await poll();
@@ -117,7 +128,7 @@ $("state-filter").addEventListener("change", renderRuns);
 $("refresh").addEventListener("click", poll);
 (async () => {
   try {
-    const data = await api("/api/bootstrap"); profiles = data.profiles;
+    const data = await api("/api/bootstrap"); profiles = data.profiles; repositories = data.repositories;
     fill($("repository"), Object.entries(data.repositories).map(([name, config]) => ({ value: name, label: name, url: config.url })));
     $("harness").value = data.defaults.harness; $("model").value = data.defaults.model; $("effort").value = data.defaults.effort || "";
     updateHarness(data.defaults.audit_profile);

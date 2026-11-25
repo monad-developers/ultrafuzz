@@ -10,7 +10,7 @@
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <header class="topbar"><a class="brand" href="/" aria-label="Ultrafuzz home"><img src="/ultrafuzz-logo.svg" alt="" width="32" height="32"><span>ultrafuzz</span><span class="version">v0.2</span></a><span class="local"><span class="dot"></span>Local dashboard</span></header>
+  <header class="topbar"><a class="brand" href="/" aria-label="Ultrafuzz home"><img src="/ultrafuzz-logo.svg" alt="" width="32" height="32"><span>ultrafuzz</span><span class="version">v0.2 experimental</span></a><span class="local"><span class="dot"></span>Local dashboard</span></header>
   <main>
     <div class="heading"><div><p class="eyebrow">AUDIT WORKSPACE</p><h1>Runs</h1><p class="subtitle">Launch audits, follow progress, and collect results.</p></div><button id="refresh" class="secondary" type="button">Refresh</button></div>
     <div id="notice" role="status" aria-live="polite" hidden></div>
@@ -29,12 +29,13 @@
           <label>Model<input id="model" name="model" placeholder="provider/model" required spellcheck="false"></label>
           <label>Label<input id="label" name="label" placeholder="e.g. baseline-v2" required maxlength="120" spellcheck="false"></label>
           <label id="properties-field" hidden>Properties<input id="properties" name="properties" placeholder="File path or prior run ID" spellcheck="false"><span class="field-help">Use the report from a property-specification run.</span></label>
+          <label id="publish-field" class="check" hidden><input id="publish" name="publish" type="checkbox"> Also publish to the results repository</label>
           <button id="launch" class="primary" type="submit" disabled>Launch run <span aria-hidden="true">↗</span></button>
           <p class="form-footnote">Repository and model defaults come from your local config.</p>
         </form>
       </aside>
     </div>
   </main>
-  <footer>Ultrafuzz <span>·</span> Prompt-driven audits on Modal</footer>
+  <footer>Ultrafuzz <span>·</span> Prompt-driven audits on Docker or Modal</footer>
 </body>
 </html>

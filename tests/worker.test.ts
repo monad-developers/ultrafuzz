@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync, chmodSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { c as createTar } from "tar";
@@ -13,7 +13,7 @@ afterEach(() => { for (const path of temporary.splice(0)) rmSync(path, { recursi
 function jobFixture(harness: "opencode" | "claude-code" | "codex" = "opencode"): { root: string; job: WorkerJob } {
   const root = mkdtempSync(join(tmpdir(), "ultrafuzz-worker-test-")); temporary.push(root); chmodSync(root, 0o755);
   const job: WorkerJob = { deadline_at: new Date(Date.now() + 3600_000).toISOString(), workspace: join(root, "workspace"), output_dir: join(root, "outputs"), profile_dir: join(root, "profile"), reference_dir: join(root, "reference"), prompt_path: join(root, "prompt.txt"), record: {
-    schema: "ultrafuzz.run.v2", id: "20261103-120000-abcd1234", label: "test", ultrafuzz_version: "0.2.0", source: { repository: "https://example.com/source", commit: "abc" }, profile: { name: "v2/test", sha256: "" }, harness: { name: harness, model: "openrouter/vendor/model" }, state: "prepared", status: "pending", end: null, exit_code: null, created_at: new Date().toISOString(), started_at: null, finished_at: null, last_observed_at: null, session_id: null, continuation: null, inputs: [], omitted: [], usage: { input_tokens: null, output_tokens: null, cost_usd: null, cost_provenance: "unavailable" }, modal: { app: "test", cpu: 1, memory_mib: 1024, timeout_seconds: 3600, sandbox_id: null, volume_name: "test" }, publication: { state: "pending", repository: "owner/results", branch: "ultrafuzz/test", path: "attempts/test/runs/test", pr_url: null },
+    schema: "ultrafuzz.run.v2", id: "20261103-120000-abcd1234", label: "test", ultrafuzz_version: "0.2.0", source: { repository: "https://example.com/source", commit: "abc" }, profile: { name: "v2/test", sha256: "" }, harness: { name: harness, model: "openrouter/vendor/model" }, state: "prepared", status: "pending", end: null, exit_code: null, created_at: new Date().toISOString(), started_at: null, finished_at: null, last_observed_at: null, session_id: null, continuation: null, inputs: [], omitted: [], usage: { input_tokens: null, output_tokens: null, cost_usd: null, cost_provenance: "unavailable" }, executor: { name: "docker", cpu: 1, memory_mib: 1024, timeout_seconds: 3600, container_name: "ultrafuzz-test", volume_name: "ultrafuzz-test", runtime_id: null }, collection: { state: "pending", path: null, report: null }, publication: { state: "disabled", repository: null, branch: "ultrafuzz/test", path: "attempts/test/runs/test", pr_url: null },
   }};
   for (const directory of [job.workspace, job.profile_dir, job.reference_dir, job.output_dir]) mkdirSync(directory, { recursive: true });
   writeFileSync(job.prompt_path, "Inspect source and write a report.");
@@ -75,11 +75,48 @@ describe("worker execution contract", () => {
   test("timeout uses original deadline and preserves partial transcript", async () => {
     const { root, job } = await stubRun("sleep 20");
     job.deadline_at = new Date(Date.now() + 1000).toISOString();
-    job.record.modal.timeout_seconds = 1;
+    job.record.executor.timeout_seconds = 1;
     writeFileSync(join(root, "job.json"), JSON.stringify(job));
     const record = await runWorker(root);
     expect(record.end).toBe("timeout"); expect(record.continuation).toBeNull();
     expect(readFileSync(join(job.output_dir, "raw/transcript.jsonl"), "utf8")).toContain("ses_test");
+  });
+  test("a failed store sync is logged and does not cost the completion record", async () => {
+    const { root, job } = await stubRun("echo '# Report' > 'REPORT'");
+    const script = join(root, "bin/opencode"); writeFileSync(script, readFileSync(script, "utf8").replace("REPORT", join(job.output_dir, "raw/report.md")));
+    // This `sync` comes first on PATH and fails, as a sync that ran out of time does.
+    writeFileSync(join(root, "bin/sync"), "#!/bin/sh\necho 'sync: simulated failure' >&2\nexit 1\n", { mode: 0o755 });
+    const record = await runWorker(root);
+    expect(record).toMatchObject({ state: "finished", status: "succeeded", end: "completed", session_id: "ses_test" });
+    expect(JSON.parse(readFileSync(join(root, "complete.json"), "utf8"))).toEqual(record);
+    expect(readFileSync(join(job.output_dir, "raw/worker.log"), "utf8").split("Unable to synchronize run output: sync: simulated failure").length - 1).toBe(2);
+  });
+  test("the harness cannot point the worker's log writes at another file", async () => {
+    // The first call swaps the transcript for a link to a file in the store, then prints a line for it.
+    const { root, job } = await stubRun(`if [[ "$*" != *"--session"* ]]; then rm -f 'RAW/transcript.jsonl' 'RAW/worker.log'; ln -s 'FORGED' 'RAW/transcript.jsonl'; ln -s 'FORGED' 'RAW/worker.log'; echo '{"forged":true}'; fi`);
+    const script = join(root, "bin/opencode"), raw = join(job.output_dir, "raw"), forged = join(root, "forged.json");
+    writeFileSync(script, readFileSync(script, "utf8").replaceAll("RAW", raw).replaceAll("FORGED", forged));
+    const record = await runWorker(root);
+    // The line went to the file that was open before the harness started, not through the link.
+    expect(existsSync(forged)).toBe(false);
+    expect(lstatSync(join(raw, "transcript.jsonl")).isSymbolicLink()).toBe(true);
+    // No report was written, so a continuation was due. It is refused, because its log path is now a link.
+    expect(record).toMatchObject({ state: "finished", status: "failed", end: "error", session_id: "ses_test" });
+    expect(record.error).toMatch(/ELOOP|symbolic link/i);
+    expect(existsSync(forged)).toBe(false);
+    expect(JSON.parse(readFileSync(join(root, "complete.json"), "utf8"))).toEqual(record);
+  });
+  // Root reads any file, so the unreadable-output fixture only works for a normal user.
+  test.skipIf(process.getuid?.() === 0)("an output redaction failure is a collection problem, not a publication one", async () => {
+    const { root, job } = await stubRun("echo '# Report' > 'REPORT'; echo note > 'LOCKED'; chmod 000 'LOCKED'");
+    const script = join(root, "bin/opencode"), locked = join(job.output_dir, "raw/locked.txt");
+    writeFileSync(script, readFileSync(script, "utf8").replace("REPORT", join(job.output_dir, "raw/report.md")).replaceAll("LOCKED", locked));
+    const record = await runWorker(root); chmodSync(locked, 0o600);
+    expect(record.status).toBe("succeeded");
+    expect(record.error).toContain("Output redaction failed");
+    expect(record.collection).toEqual({ state: "failed", path: null, report: null, error: record.error! });
+    expect(record.publication.state).toBe("disabled");
+    expect(JSON.parse(readFileSync(join(root, "complete.json"), "utf8")).collection.state).toBe("failed");
   });
   test("native configs keep host credentials out and select OpenRouter", () => {
     for (const harness of ["claude-code", "opencode", "codex"] as const) {
@@ -89,6 +126,14 @@ describe("worker execution contract", () => {
       expect(readFileSync(context.configPath, "utf8")).not.toContain("secret");
       if (harness === "claude-code") expect(context.env.ANTHROPIC_AUTH_TOKEN).toBe("secret");
     }
+  });
+  test("a profile config fragment wins over the generated configuration, as the README says", () => {
+    // A profile is trusted: its fragment can change the model and the provider route. If this changes, change the README too.
+    const { root, job } = jobFixture("opencode");
+    mkdirSync(join(job.profile_dir, "config"));
+    writeFileSync(join(job.profile_dir, "config/opencode.json"), JSON.stringify({ model: "other/model", provider: { openrouter: { options: { baseURL: "https://example.invalid/v1" } } } }));
+    const config = JSON.parse(readFileSync(prepareHarness(root, job, "secret").configPath, "utf8"));
+    expect(config).toMatchObject({ model: "other/model", permission: "allow", provider: { openrouter: { options: { baseURL: "https://example.invalid/v1", apiKey: "{env:OPENROUTER_API_KEY}" } } } });
   });
   test("source customizations are removed only from disposable tree", () => {
     const { job } = jobFixture(); mkdirSync(join(job.workspace, "nested/.agents"), { recursive: true });

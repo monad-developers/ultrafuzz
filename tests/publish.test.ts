@@ -111,6 +111,15 @@ test("public destinations are rejected before cloning", async () => {
   expect(await readFile(join(f.root, "gh.log"), "utf8")).not.toContain("repo clone");
 });
 
+test("a record without a results repository is refused before any GitHub call", async () => {
+  const f = await fixture();
+  await writeFile(join(f.root, "record.json"), JSON.stringify({ id, label: "baseline", publication: { state: "disabled", repository: null, branch, path: runPath } }));
+  const result = await f.publish();
+  expect(result.code).toBe(1);
+  expect(result.stderr).toContain("No results repository");
+  expect(await Bun.file(join(f.root, "gh.log")).exists()).toBe(false);
+});
+
 test("a competing remote commit is fetched and preserved on retry", async () => {
   const f = await fixture();
   await writeFile(join(f.bin, "git"), `#!${process.execPath}

@@ -1,0 +1,52 @@
+name: Worker image
+# Builds the real worker image with a plain `docker build` and checks each pinned tool in it.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - .github/workflows/image.yml
+permissions:
+  contents: read
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      # The Dockerfile copies dist/worker.js and plugins/ from the build context.
+      - run: bun run build
+      - run: docker build --tag ultrafuzz-worker:ci .
+      - name: Run each pinned tool
+        run: |
+          docker run --rm --entrypoint sh ultrafuzz-worker:ci -ec '
+            set -x
+            node --version
+            bun --version
+            opencode --version
+            claude --version
+            codex --version
+            forge --version
+            cast --version
+            anvil --version
+            chisel --version
+            medusa --version
+            echidna --version
+            slither --version
+            crytic-compile --version
+            solc-select --help >/dev/null
+            scribble --version
+            covg-eval --help >/dev/null
+            git --version
+            python3 --version
+            timeout --version
+            for tool in sol2cg sol2test sol2bnd sol-storage-analyzer storage-trace roundme; do test -x "/usr/local/bin/$tool"; done
+            test -f /opt/ultrafuzz/worker.js
+            test -d /opt/ultrafuzz/plugins
+            id ultrafuzz
+          '

@@ -109,7 +109,7 @@ async function materializeLfs(root: string): Promise<void> {
 
 async function prepareRepository(repository: string, revision: string | undefined, destination: string) {
   const remote = repositoryUrl(repository);
-  if (revision && (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(revision) || revision.includes(".."))) throw new Error("Invalid input repository revision");
+  if (revision && (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(revision) || revision.includes(".."))) throw new Error("Invalid repository revision");
   destination = resolve(destination);
   await mkdir(destination, { recursive: true });
   const temporary = await mkdtemp(join(destination, ".ultrafuzz-source-"));
@@ -136,8 +136,8 @@ async function prepareRepository(repository: string, revision: string | undefine
 }
 
 /** Scope constrains the prompt, not source files needed to build or test the project. */
-export async function prepareSource(repository: string, _scope: string | undefined, destination: string): Promise<{ archive: string; commit: string }> {
-  const { archive, commit } = await prepareRepository(repository, undefined, destination);
+export async function prepareSource(repository: string, _scope: string | undefined, destination: string, revision?: string): Promise<{ archive: string; commit: string }> {
+  const { archive, commit } = await prepareRepository(repository, revision, destination);
   return { archive, commit };
 }
 
