@@ -111,7 +111,7 @@ test("stateful input snapshots an explicit prior report without launching prereq
   expect(run.inputs[0]!.sha256).toHaveLength(64);
   expect(await readFile(join(home, "runs", run.id, "staging/reference/properties"), "utf8")).toContain("P-001");
   await expect(engine.launch({ repository: "example", label: "no-input", audit_profile: "v2/stateful-fuzzing" })).rejects.toThrow("requires --properties");
-  await expect(engine.launch({ repository: "example", label: "pareto", audit_profile: "v2/pareto" })).rejects.toThrow("TBD");
+  await expect(engine.launch({ repository: "example", label: "pareto", audit_profile: "v2/pareto", harness: "codex" })).rejects.toThrow("does not support");
   expect(cloud.launches).toBe(2);
 });
 

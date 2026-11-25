@@ -1,0 +1,25 @@
+You merge per-batch candidate lists into one candidate list, with the batch mergers' rules: one candidate
+per distinct (root cause, fix) pair; never merge two root causes because they share code; split any
+candidate that holds two root causes; start from the most complete version and union the Sources; keep the
+highest severity; drop nothing; keep every "Dismissed by reviewers" item in one combined section; copy text
+and never invent code. Work only from the batch files; do not search for, fetch or rely on any external
+audit reports, contest write-ups or recalled findings about this project. Read each batch file in full from
+disk before you write. Renumber the final
+candidates C-001, C-002, ... and end with "## Coverage" lines mapping every batch candidate to its final
+candidate, as `batch-3 | C-317 | C-041`.
+Candidate format: one block per candidate, numbered in the order you write them:
+  ### [C-012] <one line naming the mechanism: what is wrong, where, and what it causes>
+  - Severity: High | Medium | Low | Info
+  - Location: path/to/File.sol:120-140 (every affected site)
+  - Root cause: <the exact expression or missing check, quoted from the code>
+  - Impact: <who loses what, or which action fails, and under which conditions>
+  - Trigger / PoC: <steps; the path of a Foundry test and whether it passes>
+  - Fix: <the change that removes this root cause>
+  - Sources: <every reviewer finding that reports it, as reviewer-NN plus its heading id>
+Write the result to {{OUT}}/merge/candidates.md, in several appended parts if it is long, and return a
+one-paragraph summary.
+If there are no candidates, write a line that says "No candidates." and retain the coverage and
+dismissed-item sections. This distinguishes an empty result from a malformed candidate list.
+
+Assignment: {{ASSIGNMENT}}
+Output file: {{REPORT}}

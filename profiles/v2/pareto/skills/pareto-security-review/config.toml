@@ -1,0 +1,52 @@
+# Copy this file for each review. The coordinating agent fills the target values.
+[target]
+project = "[PROJECT]"
+repository = "[REPOSITORY]"
+revision = "[REVISION]"
+workspace = "[WORKSPACE]"
+scope = ["[AUDIT_SCOPE]"]
+threat_model = "[THREAT_MODEL]"
+
+[workflow]
+# The agent chooses groups for the target. Change these values to suit that plan.
+number_of_hunters = 86
+file_hunters_per_group = 5
+entrypoint_hunters_per_group = 4
+merge_batch_size = 10
+number_of_shards = 20
+verifiers_per_shard = 2
+appeal_reviewers = 6
+appeal_restore_limit = 2
+concurrency = 20
+retry_count = 1
+retry_delay_seconds = 60
+rejection_min_votes = 2
+# A negative vote qualifies only when its evidence length is GREATER than this.
+negative_evidence_min_chars = 10
+
+[runtime]
+# Requested host settings, not limits enforced by the rendering tools.
+# Record actual host settings and any mismatch in the run's effective-runtime.json.
+profile = "v2/pareto"
+harness = "opencode"
+model = "openrouter/deepseek/deepseek-v4.1-flash-1017"
+reasoning_effort = "max"
+max_output_tokens = 131072
+review_timeout_seconds = 82800
+sandbox_timeout_seconds = 86400
+task_timeout_seconds = 82800
+cpu = 16
+memory_mib = 65536
+minimum_free_disk_gib = 200
+build_threads = 1
+# No budget is required. Set an optional cap only when the host can enforce it.
+# budget_usd = 50
+
+[references]
+# Empty + false means a review without prior audit reports.
+supplied_reports = []
+allow_search = false
+
+[reporting]
+# A presentation filter only. Other confirmed severities remain in an appendix.
+include_severities = ["High", "Medium", "Low"]

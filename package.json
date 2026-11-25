@@ -13,7 +13,8 @@
     "build": "bun scripts/build.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "check": "bun run typecheck && bun test && bun run build"
+    "test:pareto": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s profiles/v2/pareto/skills/pareto-security-review/tests",
+    "check": "bun run typecheck && bun test && bun run test:pareto && bun run build"
   },
   "dependencies": {
     "@scure/bip39": "2.4.0",

@@ -4,3 +4,4 @@ dist/
 *.log
 .ultrafuzz/
 test-results/
+__pycache__/

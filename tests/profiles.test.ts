@@ -27,13 +27,19 @@ async function fixture(options: { available?: boolean; requires_properties?: boo
 const context: PromptContext = { repository: "https://github.com/example/project", commit: "a".repeat(40), workspace: "/run-data/workspace", output_dir: "/run-data/outputs/raw", reference_dir: "/run-data/reference", skill_dir: "/run-data/profile/skills", timeout_seconds: 7200, inputs: [] };
 
 describe("profiles", () => {
-  test("bundled catalog exposes available profiles and explicitly unavailable Pareto", async () => {
+  test("bundled catalog exposes available profiles, with Pareto v2 for OpenCode only", async () => {
     process.env.ULTRAFUZZ_PROFILE_DIR = bundledProfilesDirectory;
     const profiles = await listProfiles();
     expect(profiles.map(profile => profile.name).sort()).toEqual(["v2/pareto", "v2/property-specification", "v2/stateful-fuzzing"]);
-    await expect(loadProfile("v2/pareto", "opencode")).rejects.toThrow("unavailable");
+    expect((await loadProfile("v2/pareto", "opencode")).harnesses).toEqual(["opencode"]);
+    await expect(loadProfile("v2/pareto", "codex")).rejects.toThrow("does not support");
     expect((await loadProfile("v2/property-specification", "codex")).requires_properties).toBe(false);
     expect((await loadProfile("v2/stateful-fuzzing", "claude-code")).requires_properties).toBe(true);
+  });
+
+  test("refuses a profile that is marked unavailable", async () => {
+    await fixture({ available: false });
+    await expect(loadProfile("test/profile", "opencode")).rejects.toThrow("unavailable");
   });
 
   test("refuses unsupported harnesses and paths outside the catalog", async () => {
