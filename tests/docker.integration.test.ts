@@ -72,6 +72,10 @@ async function smallTarget(): Promise<string> {
   return directory;
 }
 
+/** The run directories in the registry of this test. */
+const registry = () => existsSync(join(home, "runs")) ? readdirSync(join(home, "runs")).filter(name => /^\d{8}-\d{6}-[a-f0-9]{8}$/.test(name)) : [];
+/** Runs of this Docker Engine that the listing form of recover registered and that this test did not launch. The cleanup never touches them. */
+const foreign = new Set<string>();
 let shared: Promise<Awaited<ReturnType<typeof createEngine>>> | undefined;
 /** One workspace and one engine for all tests. The Docker executor is the real one; only its package root differs. */
 function engine() {
@@ -95,8 +99,7 @@ function engine() {
 afterAll(async () => {
   if (!enabled) return;
   // A launch that failed half-way is not in `launched`, but the engine wrote its registry entry first.
-  const registered = existsSync(join(home, "runs")) ? readdirSync(join(home, "runs")).filter(name => /^\d{8}-\d{6}-[a-f0-9]{8}$/.test(name)) : [];
-  for (const id of new Set([...launched, ...registered])) {
+  for (const id of new Set([...launched, ...registry()].filter(id => !foreign.has(id)))) {
     const name = `ultrafuzz-${id}`;
     if (passed < 3) {
       // First aid for a failed run in CI: what Docker knows, what the worker printed, and what the engine recorded.
@@ -145,6 +148,17 @@ describe.skipIf(!enabled)("Docker executor on a real Docker Engine", () => {
     expect(done.omitted.map(item => item.path)).toContain("raw/outside-link");
     expect(readdirSync(join(home, "runs", run.id, "collected/raw"))).not.toContain("outside-link");
     expect(readdirSync(join(home, "runs", run.id, "collected/raw"))).toContain("report.md");
+    // The store holds the workspace and the home of the harness. The harness user ran a new file from each of them
+    // and took an exclusive file lock there. Build tools and package caches of a real audit need all of this.
+    expect(report).toContain("Exec in workspace: ok");
+    expect(report).toContain("Exec in home: ok");
+    expect(report).toContain("Lock: ok");
+    // The session database of the harness is in the store too, in WAL mode. The worker read the usage from it, not
+    // from the events, and the harness then opened it again to export the session.
+    expect(report).toContain("Database: wal");
+    expect(done.usage).toEqual({ input_tokens: 10, output_tokens: 5, cost_usd: 0.25, cost_provenance: expect.stringContaining("OpenCode native") });
+    expect(readFileSync(join(home, "runs", run.id, "collected/raw/sessions/ses_dockertest.json"), "utf8")).toContain('"type":"step-finish"');
+    expect(done.omitted.map(item => item.path).filter(path => path.startsWith("raw/sessions"))).toEqual([]);
     expectNoKey(join(home, "runs", run.id));
     // The finished container and its volume are kept.
     expect(await inspect("container", "inspect", "--format", "{{.State.Status}} {{.State.ExitCode}}", name)).toBe("exited 0");
@@ -157,7 +171,11 @@ describe.skipIf(!enabled)("Docker executor on a real Docker Engine", () => {
     const ultrafuzz = await engine(), id = first!.id, name = `ultrafuzz-${id}`;
     rmSync(join(home, "runs", id), { recursive: true });
     expect((await ultrafuzz.list()).map(run => run.id)).not.toContain(id);
-    const recovered = (await ultrafuzz.recover()).find(run => run.id === id);
+    // The listing finds every retained run of this Docker Engine. What it adds besides the run of this test is not ours.
+    const before = new Set(registry());
+    let recovered;
+    try { recovered = (await ultrafuzz.recover()).find(run => run.id === id); }
+    finally { for (const name of registry()) if (!before.has(name) && name !== id) foreign.add(name); }
     expect(recovered).toMatchObject({ state: "finished", status: "succeeded", end: "completed", collection: { state: "pending", path: null, report: null } });
     const collected = await ultrafuzz.status(id);
     expect(collected.collection.state).toBe("collected");

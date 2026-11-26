@@ -5,6 +5,11 @@ import { EXECUTORS, type Config, type ExecutorName, type ExecutorRecord, type Ru
 const ROOT = resolve(import.meta.dir, "..");
 /** Where every executor mounts the per-run durable store inside the runtime. */
 export const RUN_ROOT = "/run-data";
+/**
+ * The longest run on Modal, in seconds. Modal ends a sandbox after 24 hours at most, and the worker needs
+ * 300 seconds after its deadline to write the completion record.
+ */
+export const MODAL_MAX_RUN_SECONDS = 86_400 - 300;
 /** The staged runtime is copied out of the store first, so the worker never runs from a writable mount. */
 export const WORKER_COMMAND = ["sh", "-c", `mkdir -p /opt/ultrafuzz && cp -R ${RUN_ROOT}/runtime/. /opt/ultrafuzz/ && exec bun /opt/ultrafuzz/worker.js --root ${RUN_ROOT}`];
 
@@ -38,13 +43,17 @@ export async function loadExecutor(name: ExecutorName): Promise<Executor> {
   throw new Error(`Unknown executor ${String(name)}. Use one of: ${EXECUTORS.join(", ")}.`);
 }
 
-/** The executor block of a new run: resolved settings plus the handles that are known before launch. */
+/**
+ * The executor block of a new run: resolved settings plus the handles that are known before launch.
+ * `timeout_seconds` in the result is the time that the run gets on this executor. The prompt, the worker's
+ * plan and the deadline all come from it, so they agree.
+ */
 export function executorRecord(config: Config, name: ExecutorName, id: string, timeout_seconds: number): ExecutorRecord {
   if (!EXECUTORS.includes(name)) throw new Error(`The executor must be one of: ${EXECUTORS.join(", ")}.`);
   const missing = () => new Error(`Executor ${name} is not configured. Add a [${name}] table to ultrafuzz.toml.`);
   if (name === "modal") {
     if (!config.modal) throw missing();
-    return { name, ...config.modal, timeout_seconds, volume_name: id, runtime_id: null };
+    return { name, ...config.modal, timeout_seconds: Math.min(timeout_seconds, MODAL_MAX_RUN_SECONDS), volume_name: id, runtime_id: null };
   }
   if (!config.docker) throw missing();
   // Docker names share one host namespace, so they carry a prefix. The run ID stays readable.

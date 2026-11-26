@@ -216,7 +216,7 @@ describe("launch", () => {
       "--env", "OPENROUTER_API_KEY",
       "--user", "0:0", "--workdir", "/run-data", "--init", "--stop-timeout", "300",
       "--entrypoint", "timeout", "example/worker:1",
-      "-s", "TERM", "-k", "300", "3660", ...WORKER_COMMAND,
+      "-s", "TERM", "-k", "300", "3720", ...WORKER_COMMAND,
     ]);
     // The key reaches Docker through the client's environment of this one call, and by name on the command line.
     expect(create.options?.env).toEqual({ OPENROUTER_API_KEY: key });
@@ -386,7 +386,7 @@ describe("launch", () => {
     if (run.executor.name !== "docker") throw new Error("fixture");
     const args = createArguments(id, { ...run.executor, cpu: 0.5, memory_mib: 512, timeout_seconds: 7200 }, "image:tag");
     expect(args.slice(args.indexOf("--cpus"), args.indexOf("--cpus") + 4)).toEqual(["--cpus", "0.5", "--memory", "512m"]);
-    expect(args.slice(args.indexOf("image:tag"))).toEqual(["image:tag", "-s", "TERM", "-k", "300", "7260", ...WORKER_COMMAND]);
+    expect(args.slice(args.indexOf("image:tag"))).toEqual(["image:tag", "-s", "TERM", "-k", "300", "7320", ...WORKER_COMMAND]);
   });
 });
 

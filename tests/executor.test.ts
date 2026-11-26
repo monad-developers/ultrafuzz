@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RUN_ROOT, WORKER_COMMAND, executorRecord, loadExecutor, startingJob, storedRecord } from "../src/executor";
+import { MODAL_MAX_RUN_SECONDS, RUN_ROOT, WORKER_COMMAND, executorRecord, loadExecutor, startingJob, storedRecord } from "../src/executor";
 import type { Config, ExecutorName } from "../src/types";
 
 const directories: string[] = [];
@@ -30,6 +30,17 @@ test("each executor block holds resolved settings and the handles its platform n
   expect(() => executorRecord({ ...config, modal: undefined }, "modal", id, 3600)).toThrow("Executor modal is not configured. Add a [modal] table to ultrafuzz.toml.");
   expect(() => executorRecord({ ...config, docker: undefined }, "docker", id, 3600)).toThrow("Executor docker is not configured.");
   expect(() => executorRecord(config, "kubernetes" as ExecutorName, id, 3600)).toThrow("must be one of: docker, modal");
+});
+
+test("a Modal record carries the time that a run can get there", () => {
+  // Modal ends a sandbox after 24 hours, and 300 seconds of that are for the completion record.
+  expect(MODAL_MAX_RUN_SECONDS).toBe(86_100);
+  expect(executorRecord(config, "modal", id, 86_400).timeout_seconds).toBe(86_100);
+  expect(executorRecord(config, "modal", id, 86_101).timeout_seconds).toBe(86_100);
+  expect(executorRecord(config, "modal", id, 86_100).timeout_seconds).toBe(86_100);
+  expect(executorRecord({ ...config, modal: { ...config.modal!, timeout_seconds: 86_400 } }, "modal", id, 86_400).timeout_seconds).toBe(86_100);
+  // Docker has no such limit.
+  expect(executorRecord(config, "docker", id, 86_400).timeout_seconds).toBe(86_400);
 });
 
 test("the worker starts from the shared mount point and a fresh deadline", async () => {

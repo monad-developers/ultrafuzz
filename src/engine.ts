@@ -151,11 +151,27 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
       }
       return collectUnlocked(id, force);
     }),
-    async wait(id: string): Promise<RunRecord> {
+    /**
+     * Poll until the run ended and was collected. One failed poll does not end a wait of many hours: the network can
+     * fail for a short time, and another command can hold the run's operation lock. `interval` and `patience` are
+     * milliseconds; the wait gives up when every poll failed for `patience`.
+     */
+    async wait(id: string, { interval = 5000, patience = 10 * 60_000 } = {}): Promise<RunRecord> {
+      await readRun(home, id); // An unknown run fails at once.
+      let failingSince: number | null = null;
       for (;;) {
-        const record = await engine.status(id);
-        if (record.state === "finished") return record;
-        await Bun.sleep(5000);
+        try {
+          const record = await engine.status(id);
+          if (record.state === "finished") return record;
+          failingSince = null;
+        } catch (error) {
+          if (failingSince === null) {
+            failingSince = Date.now();
+            const busy = (error as NodeJS.ErrnoException).code === "ELOCKED";
+            process.stderr.write(`Run ${id}: ${busy ? "another command is working on this run" : `the status check failed (${message(error)})`}. Still waiting; this command tries again for up to ${Math.round(patience / 60_000)} minutes.\n`);
+          } else if (Date.now() - failingSince >= patience) throw error;
+        }
+        await Bun.sleep(interval);
       }
     },
     async cancel(id: string): Promise<RunRecord> {
@@ -220,6 +236,8 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
         publication: { state: options.publish ? "pending" : "disabled", repository: repository.results_repository ?? null, branch: `ultrafuzz/${id}`, path: `attempts/${options.label}/runs/${id}`, pr_url: null },
       };
       await writeRun(home, record);
+      // The executor can give less time than was asked for. Everything after this line uses the time of the record.
+      const effective = record.executor.timeout_seconds;
       const stage = join(directory(id), "staging");
       let submitted = false;
       try {
@@ -254,9 +272,9 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
           throw new Error("Properties must be a nonempty report file.");
         }
         record.inputs = await stageInputs(inputs, join(stage, "reference"));
-        const job: WorkerJob = { record, deadline_at: new Date(Date.now() + seconds * 1000).toISOString(), workspace: `${RUN_ROOT}/workspace`, output_dir: `${RUN_ROOT}/outputs`, profile_dir: `${RUN_ROOT}/profile`, reference_dir: `${RUN_ROOT}/reference`, prompt_path: `${RUN_ROOT}/prompt.txt` };
+        const job: WorkerJob = { record, deadline_at: new Date(Date.now() + effective * 1000).toISOString(), workspace: `${RUN_ROOT}/workspace`, output_dir: `${RUN_ROOT}/outputs`, profile_dir: `${RUN_ROOT}/profile`, reference_dir: `${RUN_ROOT}/reference`, prompt_path: `${RUN_ROOT}/prompt.txt` };
         const prompt = await renderPrompt(profile, { repository: repository.url, commit: source.commit, scope: repository.scope,
-          workspace: job.workspace, output_dir: `${job.output_dir}/raw`, reference_dir: job.reference_dir, skill_dir: `${job.profile_dir}/skills`, timeout_seconds: seconds - 1800, inputs: record.inputs });
+          workspace: job.workspace, output_dir: `${job.output_dir}/raw`, reference_dir: job.reference_dir, skill_dir: `${job.profile_dir}/skills`, timeout_seconds: effective - 1800, inputs: record.inputs });
         await writeFile(join(stage, "prompt.txt"), prompt);
         await writeFile(join(stage, "job.json"), JSON.stringify(job));
         record = await updateRun(home, id, current => current.end === "cancelled"

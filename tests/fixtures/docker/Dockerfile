@@ -13,7 +13,25 @@ COPY <<'EOF' /usr/local/bin/opencode
 #!/bin/sh
 # Fake OpenCode CLI for tests. It reads the prompt, prints JSON events and writes files.
 # The model name selects the behaviour: a name with "slow" waits for a stop signal.
+# Like the real command, every call appends to a log in the home directory. A call as another user
+# leaves a file that the next call cannot open.
+mkdir -p "$HOME/.local/share/opencode/log" && echo "$1 as $(id -u)" >> "$HOME/.local/share/opencode/log/opencode.log" || { echo "cannot write the log" >&2; exit 13; }
 if [ "$1" = "--version" ]; then echo "0.0.0-test"; exit 0; fi
+session="ses_dockertest"
+database="$XDG_DATA_HOME/opencode/opencode.db"
+# Like the real command, "export" opens the database for writing, as the user of the harness, after the worker has read it.
+if [ "$1" = "export" ]; then
+  DATABASE="$database" SESSION="$2" bun -e '
+    const { Database } = require("bun:sqlite");
+    const database = new Database(process.env.DATABASE, { readwrite: true });
+    const parts = database.query("SELECT data FROM part WHERE session_id = ?").all(process.env.SESSION);
+    database.run("UPDATE session SET exported = exported + 1 WHERE id = ?", [process.env.SESSION]);
+    database.close();
+    if (!parts.length) throw new Error("unknown session");
+    console.log(JSON.stringify({ info: { id: process.env.SESSION }, parts: parts.map(part => JSON.parse(part.data)) }));
+  '
+  exit "$?"
+fi
 [ "$1" = "run" ] || exit 2
 model=""
 while [ "$#" -gt 0 ]; do
@@ -23,7 +41,19 @@ done
 cat > /dev/null
 # The worker sets HOME to <run root>/state/home.
 raw="$HOME/../../outputs/raw"
-echo '{"type":"step_start","sessionID":"ses_dockertest"}'
+# Write a script into a directory and run it from there. Tools of a real audit run from the workspace and from the home.
+executes() {
+  printf '#!/bin/sh\necho executed\n' > "$1/exec-check.sh" && chmod +x "$1/exec-check.sh" && [ "$("$1/exec-check.sh")" = "executed" ]
+  status="$?"
+  rm -f "$1/exec-check.sh"
+  return "$status"
+}
+# Take a file lock. While it is held, a second holder must be refused.
+locks() {
+  flock -n "$1" true || { echo "failed (not taken)"; return; }
+  if flock "$1" flock -n "$1" true; then echo "failed (not exclusive)"; else echo "ok"; fi
+}
+echo '{"type":"step_start","sessionID":"'"$session"'"}'
 case "$model" in
   *slow*)
     echo "started" > "$raw/notes.md"
@@ -36,12 +66,33 @@ case "$model" in
       echo "# Test report"
       echo
       echo "Solidity files: $(find . -name '*.sol' | wc -l)"
+      echo "User: $(id -u)"
       echo
       ls
     } > "$raw/report.md"
     # A link that points out of the outputs. Collection must drop it and record it.
-    ln -s /etc/hostname "$raw/outside-link"
-    echo '{"type":"step_finish","sessionID":"ses_dockertest","part":{"id":"step-1","cost":0,"tokens":{"input":1,"output":1}}}'
+    if ln -s /etc/hostname "$raw/outside-link"; then echo "Link: made" >> "$raw/report.md"; fi
+    # What the real command and its tools need from the file system of the run store.
+    if executes "$PWD"; then echo "Exec in workspace: ok"; else echo "Exec in workspace: failed"; fi >> "$raw/report.md"
+    if executes "$HOME"; then echo "Exec in home: ok"; else echo "Exec in home: failed"; fi >> "$raw/report.md"
+    echo "Lock: $(locks "$HOME/lock-check" 2>&1)" >> "$raw/report.md"
+    # The session database, in the place and the journal mode of the real command, with the tables that the worker
+    # reads at the end. Its usage numbers differ from the event below, so the test can tell the two sources apart.
+    mkdir -p "$XDG_DATA_HOME/opencode"
+    echo "Database: $(DATABASE="$database" SESSION="$session" bun -e '
+      const { Database } = require("bun:sqlite");
+      const database = new Database(process.env.DATABASE);
+      const mode = database.query("PRAGMA journal_mode = WAL").get().journal_mode;
+      database.run("CREATE TABLE session (id TEXT PRIMARY KEY, exported INTEGER NOT NULL DEFAULT 0)");
+      database.run("CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL)");
+      database.run("INSERT INTO session (id) VALUES (?)", [process.env.SESSION]);
+      const add = database.prepare("INSERT INTO part (id, session_id, data) VALUES (?, ?, ?)");
+      add.run("prt_1", process.env.SESSION, JSON.stringify({ type: "text", text: "done" }));
+      add.run("prt_2", process.env.SESSION, JSON.stringify({ type: "step-finish", cost: 0.25, tokens: { input: 7, output: 3, reasoning: 2, cache: { read: 2, write: 1 } } }));
+      database.close();
+      console.log(mode);
+    ' 2>&1)" >> "$raw/report.md"
+    echo '{"type":"step_finish","sessionID":"'"$session"'","part":{"id":"step-1","cost":0,"tokens":{"input":1,"output":1}}}'
     ;;
 esac
 EOF

@@ -24,6 +24,9 @@ timeout_seconds = 21600
 # image = "ultrafuzz-worker:0.2.0"
 
 # Used only when the executor is "modal". It needs Modal credentials.
+# Modal bills cpu as physical cores. The sandbox shows that number of CPUs.
+# cpu and memory_mib are both the reservation and the limit.
+# A run on Modal gets 86100 seconds at most; a larger timeout_seconds is lowered to that.
 [modal]
 app = "ultrafuzz"
 cpu = 4

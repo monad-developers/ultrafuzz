@@ -237,6 +237,79 @@ test("runs record the selected executor and keep using it", async () => {
   expect(cloud.launches + modalCloud.launches).toBe(2);
 });
 
+test("a 24-hour run on Modal is planned with the time that Modal gives it", async () => {
+  const { home, modal, engine } = await fixture();
+  const staged = async (id: string) => ({
+    context: JSON.parse((await readFile(join(home, "runs", id, "staging/prompt.txt"), "utf8")).match(/\{[\s\S]*?\n\}/)![0]),
+    job: JSON.parse(await readFile(join(home, "runs", id, "staging/job.json"), "utf8")),
+  });
+  const before = Date.now();
+  const run = await engine.launch({ repository: "example", label: "day", executor: "modal", timeout_seconds: 86_400 });
+  // The record, the executor's copy, the worker's job and the prompt all use 86,100 seconds.
+  expect(run.executor.timeout_seconds).toBe(86_100);
+  expect(modal.records.get(run.id)!.executor.timeout_seconds).toBe(86_100);
+  const cloud = await staged(run.id);
+  expect(cloud.job.record.executor.timeout_seconds).toBe(86_100);
+  expect(Date.parse(cloud.job.deadline_at)).toBeGreaterThanOrEqual(before + 86_100_000);
+  expect(Date.parse(cloud.job.deadline_at)).toBeLessThanOrEqual(Date.now() + 86_100_000);
+  expect(cloud.context.timeout_seconds).toBe(86_100 - 1800);
+  // Docker gives the full day.
+  const local = await engine.launch({ repository: "example", label: "day", executor: "docker", timeout_seconds: 86_400 });
+  expect(local.executor.timeout_seconds).toBe(86_400);
+  expect((await staged(local.id)).context.timeout_seconds).toBe(86_400 - 1800);
+});
+
+test("wait keeps polling after a failed status call and gives up only after a long row of failures", async () => {
+  const { cloud, engine } = await fixture({ results: false });
+  const run = await engine.launch({ repository: "example", label: "patient" });
+  const observe = cloud.observe.bind(cloud), write = process.stderr.write;
+  const lines: string[] = [];
+  process.stderr.write = ((chunk: string | Uint8Array) => { lines.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  try {
+    // Two polls fail, as during a short network failure. The run ends during the third.
+    let polls = 0;
+    cloud.observe = async record => {
+      if (++polls <= 2) throw new Error("14 UNAVAILABLE: connection lost");
+      cloud.finish(run.id, "# Report");
+      return observe(record);
+    };
+    const done = await engine.wait(run.id, { interval: 1 });
+    expect(done).toMatchObject({ state: "finished", status: "succeeded", collection: { state: "collected" } });
+    expect(polls).toBe(3);
+    // One line for the row of failures, not one for each poll.
+    expect(lines).toEqual([`Run ${run.id}: the status check failed (14 UNAVAILABLE: connection lost). Still waiting; this command tries again for up to 10 minutes.\n`]);
+
+    // Another command holds the operation lock of the run, as a long collection does.
+    const busy = await engine.launch({ repository: "example", label: "busy" });
+    lines.length = 0; polls = 0;
+    const status = engine.status;
+    engine.status = async id => {
+      if (++polls === 1) throw Object.assign(new Error("Lock file is already being held"), { code: "ELOCKED" });
+      cloud.finish(busy.id, "# Report");
+      return status(id);
+    };
+    expect((await engine.wait(busy.id, { interval: 1 })).state).toBe("finished");
+    expect(lines).toEqual([`Run ${busy.id}: another command is working on this run. Still waiting; this command tries again for up to 10 minutes.\n`]);
+    engine.status = status;
+
+    // A success between failures starts the count again. Failures only, for the whole time, end the wait with the last error.
+    const lost = await engine.launch({ repository: "example", label: "lost" });
+    lines.length = 0; polls = 0;
+    cloud.observe = async record => {
+      polls++;
+      setSystemTime(new Date(Date.now() + 4 * 60_000));
+      if (polls === 3) return observe(record);
+      throw new Error(`failure ${polls}`);
+    };
+    // Polls 1 and 2 fail, 4 minutes apart. Poll 3 works. Polls 4 to 7 fail: poll 7 is the first that is 10 minutes or more after poll 4.
+    await expect(engine.wait(lost.id, { interval: 1 })).rejects.toThrow("failure 7");
+    expect(polls).toBe(7);
+    expect(lines).toHaveLength(2);
+  } finally { process.stderr.write = write; cloud.observe = observe; }
+  // A run that this machine does not know fails at once.
+  await expect(engine.wait("20200101-000000-00000000")).rejects.toThrow();
+});
+
 test("an executor without a config table is rejected before launch and recovery", async () => {
   const { cloud, modal, engine, requested } = await fixture({ defaults: 'executor="modal"\n', tables: modalTable });
   await expect(engine.launch({ repository: "example", label: "none", executor: "docker" })).rejects.toThrow("Executor docker is not configured. Add a [docker] table");

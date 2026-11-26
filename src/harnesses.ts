@@ -195,7 +195,7 @@ export async function exportSessions(context: HarnessContext, deadline: number, 
   } finally { database.close(); }
   for (const id of ids) {
     if (Date.now() >= deadline || !/^[a-zA-Z0-9_-]+$/.test(id)) { omitted(`raw/sessions/${id}.json`, "Session export unavailable; native database retained in the run store"); continue; }
-    const output = await captureCommand([context.executable, "export", id], context, Math.min(30_000, deadline - Date.now()));
+    const output = await captureCommand([context.executable, "export", id], context, Math.min(30_000, deadline - Date.now()), true);
     if (output.code === 0) write(join(destination, `${id}.json`), redactText(output.stdout, [context.env.OPENROUTER_API_KEY!]).text);
     else omitted(`raw/sessions/${id}.json`, "Session export failed; native database retained in the run store");
   }
@@ -239,9 +239,15 @@ async function codexNativeUsage(context: HarnessContext, directory: string, dead
   } catch { /* Price lookup failure does not fail the audit. */ }
   return usage;
 }
-export async function captureCommand(command: string[], context: Pick<HarnessContext, "workspace" | "env">, timeout: number): Promise<{ code: number | null; stdout: string; stderr: string }> {
+/** The harness never runs as root. A root worker starts it, and every other command of the harness, as this user. */
+export const harnessUser = (uid = process.getuid?.()): { uid?: number; gid?: number } => uid === 0 ? { uid: 10001, gid: 10001 } : {};
+/**
+ * Run a short command and capture its output. `asHarness` runs it as the harness user: a harness command that
+ * runs as root, even `--version`, leaves root-owned files in the harness home, and the audit then cannot open them.
+ */
+export async function captureCommand(command: string[], context: Pick<HarnessContext, "workspace" | "env">, timeout: number, asHarness = false): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolvePromise) => {
-    const child = spawn(command[0]!, command.slice(1), { cwd: context.workspace, env: context.env, stdio: ["ignore", "pipe", "pipe"], detached: true });
+    const child = spawn(command[0]!, command.slice(1), { cwd: context.workspace, env: context.env, stdio: ["ignore", "pipe", "pipe"], detached: true, ...(asHarness ? harnessUser() : {}) });
     let stdout = "", stderr = "";
     child.stdout.on("data", (data) => { stdout += data; });
     child.stderr.on("data", (data) => { stderr += data; });

@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync, chmodSync, lstatSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync, existsSync, chmodSync, lstatSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { c as createTar } from "tar";
-import { deadlines, nonemptyReport, removeProjectCustomizations, runWorker } from "../src/worker";
-import { codexPricingModelMatches, harnessCommand, prepareHarness, profileEnvironment, usageFromEvents } from "../src/harnesses";
+import { boundRecord, deadlines, nonemptyReport, removeProjectCustomizations, runWorker } from "../src/worker";
+import { codexPricingModelMatches, harnessCommand, harnessUser, prepareHarness, profileEnvironment, usageFromEvents } from "../src/harnesses";
 import type { WorkerJob } from "../src/types";
 
 const temporary: string[] = [];
@@ -20,11 +20,12 @@ function jobFixture(harness: "opencode" | "claude-code" | "codex" = "opencode"):
   writeFileSync(join(job.profile_dir, "prompt.mdx"), "Inspect source.");
   return { root, job };
 }
-async function stubRun(behavior: string): Promise<{ root: string; job: WorkerJob }> {
+/** `sources` are more files of the audited source, by path. */
+async function stubRun(behavior: string, sources: Record<string, string> = {}): Promise<{ root: string; job: WorkerJob }> {
   const fixture = jobFixture(), { root, job } = fixture;
   const source = join(root, "source"), bin = join(root, "bin"); mkdirSync(source); mkdirSync(bin);
-  writeFileSync(join(source, "source.sol"), "// source");
-  await createTar({ gzip: true, cwd: source, file: join(root, "source.tar.gz") }, ["source.sol"]);
+  for (const [name, text] of Object.entries({ "source.sol": "// source", ...sources })) { mkdirSync(dirname(join(source, name)), { recursive: true }); writeFileSync(join(source, name), text); }
+  await createTar({ gzip: true, cwd: source, file: join(root, "source.tar.gz") }, readdirSync(source));
   const script = `#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo '1.19.3'; exit 0; fi\ncat >/dev/null\necho '{"type":"text","sessionID":"ses_test"}'\n${behavior}\n`;
   writeFileSync(join(bin, "opencode"), script, { mode: 0o755 });
   writeFileSync(join(root, "job.json"), JSON.stringify(job));
@@ -32,8 +33,19 @@ async function stubRun(behavior: string): Promise<{ root: string; job: WorkerJob
   process.env.OPENROUTER_API_KEY = "test-secret-never-publish";
   return fixture;
 }
+/** A `sync` that comes first on PATH. It writes its arguments to a file, after `seconds` when given. */
+function fakeSync(root: string, seconds = 0): string {
+  const calls = join(root, "sync-calls.txt");
+  writeFileSync(join(root, "bin/sync"), `#!/bin/sh\n${seconds ? `sleep ${seconds}\n` : ""}echo "$*" >> '${calls}'\n`, { mode: 0o755 });
+  return calls;
+}
 
 describe("worker execution contract", () => {
+  test("a root worker starts every harness command as the harness user, and another user starts it as itself", () => {
+    expect(harnessUser(0)).toEqual({ uid: 10001, gid: 10001 });
+    expect(harnessUser(10001)).toEqual({});
+    expect(harnessUser(1000)).toEqual({});
+  });
   test("cutoffs share an absolute deadline, including short runs", () => {
     expect(deadlines(0, 3600_000)).toEqual({ initial: 1800_000, continuation: 3000_000, export: 3600_000 });
     expect(deadlines(0, 60_000)).toEqual({ initial: 30_000, continuation: 50_000, export: 60_000 });
@@ -89,7 +101,100 @@ describe("worker execution contract", () => {
     const record = await runWorker(root);
     expect(record).toMatchObject({ state: "finished", status: "succeeded", end: "completed", session_id: "ses_test" });
     expect(JSON.parse(readFileSync(join(root, "complete.json"), "utf8"))).toEqual(record);
-    expect(readFileSync(join(job.output_dir, "raw/worker.log"), "utf8").split("Unable to synchronize run output: sync: simulated failure").length - 1).toBe(2);
+    // Each of the two commands fails before the completion record and after it.
+    const log = readFileSync(join(job.output_dir, "raw/worker.log"), "utf8");
+    for (const command of [`sync -f ${root}`, `sync ${root}`]) expect(log.split(`Unable to synchronize run output (${command}): sync: simulated failure`).length - 1).toBe(2);
+  });
+  test("the store is flushed and committed before and after the completion record", async () => {
+    const { root, job } = await stubRun("echo '# Report' > 'REPORT'");
+    const script = join(root, "bin/opencode"); writeFileSync(script, readFileSync(script, "utf8").replace("REPORT", join(job.output_dir, "raw/report.md")));
+    const calls = fakeSync(root);
+    await runWorker(root);
+    // `sync -f` flushes a Docker volume. `sync <mount point>` commits a Modal version 2 Volume.
+    expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual([`-f ${root}`, root, `-f ${root}`, root]);
+    // Nothing failed, so nothing was logged.
+    expect(existsSync(join(job.output_dir, "raw/worker.log"))).toBe(false);
+  });
+  test("after the deadline the optional export is skipped and recorded, and each sync keeps its time", async () => {
+    // The harness ends one second after its stop signal, so the worker starts its last steps after the deadline.
+    const { root, job } = await stubRun("echo changed > new.sol; echo test-secret-never-publish > 'RAW/note.txt'; trap 'sleep 1; exit 0' TERM; sleep 20 & wait");
+    const script = join(root, "bin/opencode"), raw = join(job.output_dir, "raw"); writeFileSync(script, readFileSync(script, "utf8").replace("RAW", raw));
+    const calls = fakeSync(root, 0.3);
+    job.deadline_at = new Date(Date.now() + 1000).toISOString();
+    job.record.executor.timeout_seconds = 1;
+    writeFileSync(join(root, "job.json"), JSON.stringify(job));
+    const record = await runWorker(root, { grace: 1000 });
+    expect(Date.now()).toBeGreaterThan(Date.parse(job.deadline_at));
+    expect(record).toMatchObject({ state: "finished", end: "timeout", session_id: "ses_test" });
+    expect(record.omitted).toContainEqual({ path: "raw/workspace", reason: "Export stopped at the time limit; the workspace stays in the run store" });
+    expect(record.omitted).toContainEqual({ path: ".", reason: "Worker redaction pass stopped at the time limit; the collector redacts again before it packages" });
+    expect(existsSync(join(raw, "workspace"))).toBe(false);
+    expect(readFileSync(join(raw, "note.txt"), "utf8")).toContain("test-secret-never-publish");
+    expect(JSON.parse(readFileSync(join(root, "complete.json"), "utf8"))).toEqual(record);
+    // No sync was stopped before it finished, although the deadline was over when each one started.
+    expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual([`-f ${root}`, root, `-f ${root}`, root]);
+    expect(readFileSync(join(raw, "worker.log"), "utf8")).not.toContain("Unable to synchronize");
+  }, 20_000);
+  test("a cancelled worker ends itself when the grace period is over", async () => {
+    const stuck = await stubRun("trap 'sleep 1; exit 0' TERM; touch 'READY'; sleep 20 & wait");
+    const script = join(stuck.root, "bin/opencode"), ready = join(stuck.root, "ready"); writeFileSync(script, readFileSync(script, "utf8").replace("READY", ready));
+    fakeSync(stuck.root);
+    const exits: number[] = [];
+    // The stop request comes when the harness runs. The harness needs one second to stop; the grace period is shorter.
+    let poll = setInterval(() => { if (existsSync(ready)) { clearInterval(poll); process.emit("SIGTERM"); } }, 10);
+    const late = await runWorker(stuck.root, { grace: 300, exit: (code) => { exits.push(code); } });
+    clearInterval(poll);
+    expect(exits).toEqual([1]);
+    expect(late.end).toBe("cancelled");
+    expect(readFileSync(join(stuck.job.output_dir, "raw/worker.log"), "utf8")).toContain("The grace period ended before the worker finished.");
+    // A worker that stops in time does not use the exit.
+    const quick = await stubRun("touch 'READY'; sleep 20");
+    writeFileSync(join(quick.root, "bin/opencode"), readFileSync(join(quick.root, "bin/opencode"), "utf8").replace("READY", join(quick.root, "ready")));
+    fakeSync(quick.root);
+    exits.length = 0;
+    poll = setInterval(() => { if (existsSync(join(quick.root, "ready"))) { clearInterval(poll); process.emit("SIGTERM"); } }, 10);
+    const stopped = await runWorker(quick.root, { grace: 60_000, exit: (code) => { exits.push(code); } });
+    clearInterval(poll);
+    expect(stopped.end).toBe("cancelled");
+    expect(exits).toEqual([]);
+    expect(existsSync(join(quick.root, "complete.json"))).toBe(true);
+  }, 20_000);
+  test("a generated directory is one omitted entry with a file count, and its new files are not copied", async () => {
+    const { root, job } = await stubRun("mkdir -p corpus/a test/out .venv/lib/python3.11/site-packages/pkg; echo z > .venv/lib/python3.11/site-packages/pkg/mod.py; echo z > .venv/pyvenv.cfg; for i in $(seq 1 30); do echo x > corpus/a/$i; done; echo y > test/out/build.json; echo '{\"changed\":true}' > artifacts/abi.json; echo changed > new.sol; echo '# Report' > 'REPORT'",
+      { "artifacts/abi.json": "{}", "cache/keep.txt": "kept" });
+    const script = join(root, "bin/opencode"), raw = join(job.output_dir, "raw"); writeFileSync(script, readFileSync(script, "utf8").replace("REPORT", join(raw, "report.md")));
+    fakeSync(root);
+    const record = await runWorker(root);
+    expect(record.status).toBe("succeeded");
+    const reason = (count: number) => `Generated cache/corpus retained in the run store (${count} new or changed ${count === 1 ? "file" : "files"})`;
+    // The unchanged source directory `cache` has no entry.
+    expect(record.omitted.filter(item => item.path.startsWith("raw/workspace")).sort((a, b) => a.path.localeCompare(b.path))).toEqual([
+      // A Python environment is named once, at its top directory.
+      { path: "raw/workspace/.venv", reason: reason(2) }, { path: "raw/workspace/artifacts", reason: reason(1) }, { path: "raw/workspace/corpus", reason: reason(30) }, { path: "raw/workspace/test/out", reason: reason(1) },
+    ]);
+    expect(readdirSync(join(raw, "workspace"))).toEqual(["new.sol"]);
+  });
+  test("the completion record stays far below the size that its readers accept", async () => {
+    const { root, job } = jobFixture();
+    // One entry for each of 200,000 paths is more than 16 MiB.
+    const many = { ...job.record, omitted: Array.from({ length: 200_000 }, (_, index) => ({ path: `raw/workspace/corpus/${String(index).padStart(60, "0")}`, reason: "Generated cache/corpus retained in the run store" })) };
+    expect(Buffer.byteLength(JSON.stringify(many, null, 2))).toBeGreaterThan(16 * 1024 * 1024);
+    const bounded = boundRecord(structuredClone(many));
+    expect(Buffer.byteLength(JSON.stringify(bounded, null, 2))).toBeLessThan(1024 * 1024);
+    const last = bounded.omitted.at(-1)!;
+    expect(bounded.omitted.slice(0, -1)).toEqual(many.omitted.slice(0, bounded.omitted.length - 1));
+    expect(last).toEqual({ path: ".", reason: `${200_000 - (bounded.omitted.length - 1)} more omitted entries are not listed; the files stay in the run store` });
+    expect(boundRecord(structuredClone(job.record))).toEqual(job.record);
+    // The worker applies the limit: a harness that fails with two megabytes of text gives a small record.
+    const failing = await stubRun("exit 0");
+    writeFileSync(join(failing.root, "bin/opencode"), "#!/usr/bin/env bash\nhead -c 2097152 /dev/zero | tr '\\0' 'e' >&2\nexit 1\n", { mode: 0o755 });
+    fakeSync(failing.root);
+    const record = await runWorker(failing.root);
+    expect(record.error).toStartWith("Harness unavailable: eeee");
+    expect(record.error!.length).toBeLessThan(5000);
+    expect(statSync(join(failing.root, "complete.json")).size).toBeLessThan(64 * 1024);
+    expect(statSync(join(failing.root, "run.json")).size).toBeLessThan(64 * 1024);
+    expect(root).not.toBe(failing.root);
   });
   test("the harness cannot point the worker's log writes at another file", async () => {
     // The first call swaps the transcript for a link to a file in the store, then prints a line for it.

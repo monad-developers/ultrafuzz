@@ -21,7 +21,7 @@ const SCHEMA = "ultrafuzz.run.v2";
 /** Time between SIGTERM and SIGKILL, for a cancellation and for a missed deadline. */
 const GRACE_SECONDS = 300;
 /** A healthy worker ends before its deadline. The container-level timer acts only after this margin. */
-const DEADLINE_SLACK_SECONDS = 60;
+const DEADLINE_SLACK_SECONDS = 120;
 const RUN_ID = /^\d{8}-\d{6}-[a-f0-9]{8}$/;
 /** Docker's own rule for names. It also keeps a handle from being read as an option or as a `container:path`. */
 const NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;

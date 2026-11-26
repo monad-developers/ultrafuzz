@@ -14,6 +14,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:docker": "ULTRAFUZZ_DOCKER_TEST=1 bun test ./tests/docker.integration.test.ts --timeout 1800000",
+    "test:modal": "ULTRAFUZZ_MODAL_TEST=1 bun test ./tests/modal.integration.test.ts --timeout 1800000",
     "test:pareto": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s profiles/v2/pareto/skills/pareto-security-review/tests",
     "check": "bun run typecheck && bun test && bun run test:pareto && bun run build"
   },

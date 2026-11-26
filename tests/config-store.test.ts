@@ -68,6 +68,11 @@ test("the init template selects Docker, the collaborative profile and local-only
   expect(loaded.docker).toEqual({ cpu: 4, memory_mib: 8192, timeout_seconds: 21600 });
   expect(loaded.modal!.app).toBe("ultrafuzz");
   expect(loaded.repositories).toEqual({});
+  // The [modal] block says what its numbers mean on Modal, just above the table.
+  const notes = template.slice(template.indexOf("# Used only when the executor is \"modal\""), template.indexOf("[modal]"));
+  expect(notes).toContain("# Modal bills cpu as physical cores. The sandbox shows that number of CPUs.");
+  expect(notes).toContain("# cpu and memory_mib are both the reservation and the limit.");
+  expect(notes).toContain("# A run on Modal gets 86100 seconds at most; a larger timeout_seconds is lowered to that.");
 });
 
 test("the executor defaults to Docker and only its own table is required", async () => {
