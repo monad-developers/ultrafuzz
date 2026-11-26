@@ -99,6 +99,7 @@ Run `bun dist/cli.js --help` for the same list.
 | `list` | List local runs. |
 | `status <id>` | Refresh a run. Collect its report if it ended. |
 | `wait <id>` | Wait until a run ends and its report is collected. A failed status request does not end it: it prints one line, continues, and stops only after 10 minutes of failures. |
+| `watch [id...]` | Collect many runs as they end, then print a summary. See [Watch many runs](#watch-many-runs). |
 | `collect <id>` | Collect the local report. Retry publication if it is enabled. |
 | `cancel <id>` | Request a stop, with time to export artifacts. |
 | `recover [id]` | Rebuild local records from the executor's retained storage. |
@@ -123,17 +124,46 @@ Global options: `--home <directory>`, `--json`, `--help`, `--version`.
 | `launch` | `--timeout <seconds>` | Timeout for this run, 3600 to 86400. A run on Modal gets 86100 at most. |
 | `launch` | `--input <name=path\|JSON>` | A named file, directory or repository input. Repeatable. |
 | `launch` | `--inputs <file.json>` | A JSON array of input records. |
+| `watch` | `--label <name>` | Watch the runs with this label. Not together with run IDs. |
+| `watch` | `--interval <seconds>` | The pause between two cycles, from 5 to 86400. The default is 60. |
+| `watch` | `--once` | Do one cycle, print the summary and exit. |
 | `collect` | `--force` | Download and package again. |
 | `recover` | `--executor <name>` | The executor whose storage is read. |
 | `viewer` | `--port <number>` | The default is 3000. |
 
-With `--json`, each command prints one JSON object with a `schema` field. `wait` and `collect` exit with code 1 when collection failed, or when a requested publication failed. A failed audit is not a failed command.
+With `--json`, each command prints one JSON object with a `schema` field. `watch` prints one such line for each change and one at the end. `wait`, `collect` and `watch` exit with code 1 when collection failed, or when a requested publication failed. A failed audit is not a failed command. `watch` has more exit codes: see [Watch many runs](#watch-many-runs).
 
-`status` and `wait` collect a run that has ended. A failed collection or publication is tried again on the next `status`, `wait` or `collect`. Plain `collect` does nothing when the run is already collected and, if publication is on, published.
+`status`, `wait` and `watch` collect a run that has ended. A failed collection or publication is tried again on the next `status`, `wait` or `collect`, and in a later cycle of `watch`. Plain `collect` does nothing when the run is already collected and, if publication is on, published.
 
 A launch can fail before the run reaches the executor, for example when Docker is not installed or the clone fails. Such a run is recorded as failed. It has nothing to collect, and `status` prints the cause. If a launch is killed while it prepares the run, the record stays in the state `prepared`. Use `cancel` and then `status` to end it.
 
 The dashboard lists the runs of all configured repositories. It can launch and cancel runs, and it links the local report. It listens only on `127.0.0.1`.
+
+### Watch many runs
+
+`watch` collects many runs with one command. It stays in the foreground and works in cycles. In each cycle it calls `status` for each watched run that is not settled, one run after the other. Thus it collects each run that has ended, and publishes it if publication is on. It never starts, cancels or deletes a run.
+
+```sh
+bun dist/cli.js watch                      # every run that is not settled
+bun dist/cli.js watch --label properties   # the runs with one label
+bun dist/cli.js watch RUN_ID RUN_ID        # these runs only
+```
+
+A run is settled when it has ended, it is collected, and it is published if publication is on. A run that ended without a report is settled when its evidence is collected.
+
+- **Runs.** With IDs, `watch` watches those runs. With `--label`, it watches the runs with that label. In these two cases the summary also shows the runs that were settled before. With neither, it watches every local run that is not settled. This includes old runs whose collection or publication failed: `watch` tries them again, and it exits with code 1 if they fail again. Without IDs, each cycle also picks up the runs that were launched after the watch started.
+- **Credentials.** Start `watch` with the same executor credentials as the launches. For Modal, use the same profile and environment. If the executor does not know a running run, `status` and `watch` write one line to standard error and keep the run as it is. The run is recorded as lost only when the answer stays the same for 30 minutes, and that record is final. So run `status <id>` on one run first, and read standard error.
+- **Output.** One line for each change: a run started, a run ended, a run was collected (with the path of the report), a collection or publication failed, a run was published, a run was given up. A run that already runs when the watch starts gets no `started` line, so standard output can stay empty until the first run ends. At the end there is a summary. Its first line counts the runs, the runs with a report, the settled runs, the watch failures and the runs that are not settled. Then there is one line for each run: ID, label, repository, outcome, the failed step if there is one, the path of `report.md` or `no report`, and the pull request if there is one. An ID without a usable record gives the line `<id>  unknown run`. A watch failure is a run whose collection or requested publication failed, a run that was given up, or an ID without a usable record. A failed audit is not a watch failure.
+- **JSON.** With `--json`, each line on standard output is a JSON object with `"schema": "ultrafuzz.watch.v2"`, a `type` and the time `at`. Use this mode for a log: the text lines have no time. An argument error, or a registry that cannot be read in the first cycle, gives one line with the schema `ultrafuzz.error.v2` and no summary.
+  - A change has the type `started`, `ended`, `collected`, `collection_failed`, `published`, `publication_failed` or `gave_up`. Its fields are `id`, `label`, `repository`, `state`, `status`, `end`, `executor`, `collection`, `publication`, `package_path`, `report_path` and `pr_url`. A failure also has `error`, and `attempt` and `attempts` for a collection or publication.
+  - The last line has the type `summary`. Its fields are the counts `total`, `reports`, `settled`, `failed` and `not_settled`, the list `runs`, and the list `unknown` of IDs without a usable record. Each item of `runs` has the fields of a change and the booleans `settled` and `gave_up`.
+- **Failed status check.** The network, the executor or the lock of a run can make a status check fail. `watch` writes one line to standard error and tries again in each cycle. If each check for one run fails for 2 hours, `watch` gives that run up and continues with the other runs. A status call that takes longer than ten minutes gets a line on standard error each ten minutes.
+- **Failed collection or publication.** `watch` tries again later, at most 5 times in a row for each of the two steps. The pauses between the attempts are 2, 4, 8 and 16 minutes, so the attempts cover 30 minutes. An attempt is made in the first cycle after its pause. After the fifth failure, `watch` stops work on that run. Use `collect <id>` to try again later. If that works while the watch still runs, the summary shows the run as settled.
+- **Damaged or removed record.** If the record of a run cannot be read, or is removed during the watch, `watch` writes one line to standard error and does not work on that run. The other runs are not affected. With IDs, a run without a usable record is a watch failure. With `--label` or with no ID, a run whose record cannot be read when the watch starts is not watched and is not in the summary.
+- **End.** `watch` ends when each watched run is settled or was given up. With `--once` it ends after one cycle. With nothing to watch it prints one line and ends. It has no time limit. A run whose record stays in the state `prepared` keeps it alive: end such a run with `cancel`, as the paragraph above shows.
+- **Signals.** After `SIGINT` or `SIGTERM`, `watch` completes the run that it is working on, prints the summary and ends. A signal that is sent to the `watch` process does not stop a collection in the middle. A second signal in the first 2 seconds is ignored, because some tools send each signal twice. A later second signal ends the process immediately. `SIGHUP` is not handled: a watch in a terminal that closes ends at once, without a summary, so start a long watch with `nohup` or in a terminal multiplexer. Ctrl-C in a terminal goes to the full process group. It thus also stops the `docker`, `git` and `gh` commands that the collection of a Docker run and a publication use. That step is then recorded as failed, and the next `status`, `collect` or `watch` tries it again. The collection of a Modal run is not affected.
+- **Exit code.** 0 when the watch ended and there was no watch failure. A label that matches no run also gives `No runs to watch.` and 0, so check the spelling of the label. An argument error gives 1. A failed audit and a run without a report do not change this. With `--once`, a run that is still active does not change this. 1 when there was a watch failure. 130 after `SIGINT` and 143 after `SIGTERM` when there was no watch failure but a run was not settled. Exit code 0 does not show that each run has a report: read `reports` in the summary, or `report_path` of each run.
+- **Progress.** `watch` writes one progress line to standard error before the first pause, and then at most one in ten minutes.
 
 `--home <directory>` or the `ULTRAFUZZ_HOME` variable selects another workspace. The default layout is:
 
@@ -418,7 +448,7 @@ The specification describes these items. This release does not have them:
 - ChatGPT and Claude subscription routes.
 - The retention plugin and the cleanup command. Remove storage by hand, as shown in the Docker and Modal sections.
 - Launch retry with a request ID.
-- The `config`, `show`, `logs`, `publish` and `watch` commands.
+- The `config`, `show`, `logs` and `publish` commands.
 - The extra outcome states. A run has `state`, `status` and `end` only.
 - Pareto v2 on Claude Code and Codex.
 

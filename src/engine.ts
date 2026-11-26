@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { loadConfig } from "./config";
 import { listRuns, readRun, updateRun, withRunOperation, writeRun } from "./store";
@@ -20,6 +20,48 @@ const nonempty = async (path: string) => await exists(path) && (await readFile(p
 export const settled = (record: RunRecord) => record.state === "finished" && record.collection.state === "collected"
   && (record.publication.state === "disabled" || record.publication.state === "published");
 export type Publisher = typeof publishRun;
+const absent = (error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; };
+/** Why a status call for a run failed. A busy operation lock is normal during a long collection. */
+const failure = (id: string, error: unknown) => `Run ${id}: ${(error as NodeJS.ErrnoException).code === "ELOCKED" ? "another command is working on this run" : `the status check failed (${message(error)})`}.`;
+/** A pause that an abort ends early. A timer cannot be longer than 2^31 - 1 ms: a larger value would end at once. */
+const pause = (ms: number, signal?: AbortSignal) => new Promise<void>(resolve => {
+  const end = () => { clearTimeout(timer); signal?.removeEventListener("abort", end); resolve(); };
+  const timer = setTimeout(end, Math.min(ms, 2 ** 31 - 1));
+  signal?.addEventListener("abort", end);
+});
+
+/** A watch stops retrying a run after this many failed collections or publications in a row. */
+/** A running run is recorded as lost when its executor has not known it for this long, in milliseconds. */
+export const LOST_AFTER = 30 * 60_000;
+export const WATCH_ATTEMPTS = 5;
+export interface WatchEvent {
+  type: "started" | "ended" | "collected" | "collection_failed" | "published" | "publication_failed" | "gave_up";
+  run: RunRecord;
+  /** On the failure events: the failed attempts in a row for this step of the run, and the limit. */
+  attempt?: number;
+  attempts?: number;
+  /** On `gave_up` after status calls that failed for too long: the last failure. */
+  error?: string;
+}
+/** `run` is null for an ID without a usable record: the registry does not have it, or its record is damaged. */
+export interface WatchRow { id: string; run: RunRecord | null; gave_up: boolean }
+export interface WatchOptions {
+  /** Watch these runs only. Without IDs: the runs of `label`, or every run that is not settled. */
+  ids?: string[];
+  label?: string;
+  /** The pause between cycles, in milliseconds. */
+  interval?: number;
+  once?: boolean;
+  attempts?: number;
+  /** The pause before the second attempt of a failed collection or publication, in milliseconds. Each later pause is twice as long. */
+  retry?: number;
+  /** A run is given up when every status call for it failed for this long, in milliseconds. */
+  patience?: number;
+  /** An abort ends the watch after the run that is being refreshed. */
+  signal?: AbortSignal;
+  on?: (event: WatchEvent) => void;
+  sleep?: typeof pause;
+}
 /** End a run that never reached the executor. Nothing exists to collect or to publish, so both are closed. */
 const unlaunched = (record: RunRecord, end: "cancelled" | "error"): RunRecord => ({
   ...record, state: "finished", status: "failed", end, finished_at: now(),
@@ -103,7 +145,8 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
       return updateRun(home, id, current => current.state === "prepared" ? unlaunched(current, "cancelled") : current);
     }
     const observed = await (await executor(record.executor.name)).observe(record);
-    const cancelled = record.end === "cancelled";
+    const cancelled = record.end === "cancelled", previouslyUnknown = !!record.unknown_since;
+    if (observed.code !== undefined || observed.complete) delete record.unknown_since;
     if (observed.complete) {
       // The worker owns execution data. What the host decided at launch stays host-owned: the run's identity,
       // its handles and its publication. A record from the store cannot change them.
@@ -117,6 +160,12 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
     } else if (observed.code === null) {
       record.state = "running";
       record.executor.runtime_id = observed.runtime_id ?? record.executor.runtime_id;
+    } else if (observed.code === undefined && record.state === "running" && !cancelled
+      && Date.now() - Date.parse(record.unknown_since ??= now()) < LOST_AFTER) {
+      // The platform does not know a run that this machine holds as running. Other credentials, or another
+      // environment, give the same answer for every run, and "lost" is final. So the run stays as it is until
+      // the answer has been the same for 30 minutes.
+      if (!previouslyUnknown) process.stderr.write(`Run ${id}: the ${record.executor.name} executor does not know this run. Check the credentials and the environment of this command. The run is recorded as lost if the answer stays the same for ${LOST_AFTER / 60_000} minutes.\n`);
     } else if (observed.code !== undefined || record.state === "running"
       // The 30 minutes count from the hand-over to the platform. Preparation before it can take longer.
       || Date.now() - Date.parse(record.started_at ?? record.created_at) > 30 * 60_000) {
@@ -167,12 +216,119 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
         } catch (error) {
           if (failingSince === null) {
             failingSince = Date.now();
-            const busy = (error as NodeJS.ErrnoException).code === "ELOCKED";
-            process.stderr.write(`Run ${id}: ${busy ? "another command is working on this run" : `the status check failed (${message(error)})`}. Still waiting; this command tries again for up to ${Math.round(patience / 60_000)} minutes.\n`);
+            process.stderr.write(`${failure(id, error)} Still waiting; this command tries again for up to ${Math.round(patience / 60_000)} minutes.\n`);
           } else if (Date.now() - failingSince >= patience) throw error;
         }
         await Bun.sleep(interval);
       }
+    },
+    /**
+     * Collect many runs as they end. Each cycle calls `status` for every watched run that is not settled, one after
+     * the other. A watch only observes, collects and publishes: it never launches, cancels or deletes. A status call
+     * that fails is tried again at the next cycle, until every call failed for `patience`. A collection or publication
+     * that fails `attempts` times in a row is left alone; the pause before each new attempt is twice the one before.
+     * The watch ends when no watched run is left to refresh. Without IDs, each cycle also picks up the runs that were
+     * launched since the last one.
+     */
+    async watch({ ids = [], label, interval = 60_000, once = false, attempts = WATCH_ATTEMPTS, retry = 2 * 60_000, patience = 2 * 3_600_000, signal, on = () => {}, sleep = pause }: WatchOptions = {}): Promise<WatchRow[]> {
+      type Row = WatchRow & { started: boolean; failures: number; retryAt: number; failingSince: number | null };
+      const rows = new Map<string, Row>(), damaged = new Set<string>();
+      const add = (id: string, run: RunRecord | null, started: boolean) => { if (!rows.has(id)) rows.set(id, { id, run, gave_up: false, started, failures: 0, retryAt: 0, failingSince: null }); };
+      const open = (row: WatchRow) => !!row.run && !row.gave_up && !settled(row.run);
+      /**
+       * The local record of a run, or null when it is absent or damaged. No retry repairs a damaged record, so it is
+       * reported once. An absent record is reported with `absentText`, if given. Other read errors are thrown.
+       */
+      const local = async (id: string, absentText?: string): Promise<RunRecord | null> => {
+        try { return await readRun(home, id); }
+        catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code && code !== "ENOENT") throw error;
+          const text = code ? absentText : damaged.has(id) ? undefined : `the record cannot be read (${message(error)}). The watch does not work on this run`;
+          if (text) process.stderr.write(`Run ${id}: ${text}.\n`);
+          if (!code) damaged.add(id);
+          return null;
+        }
+      };
+      /**
+       * Read the record of a row again. A record that is gone or damaged ends the work on the row: `status` cannot
+       * repair it, and would create the run directory again. Another command can also change a run that the watch
+       * holds as done: a slow launch revives a run that a poll ended as lost, and `collect` completes a run that the
+       * watch gave up. A read error is left to the status call, which reports it.
+       */
+      const sync = async (row: Row) => {
+        if (!row.run) return;
+        const run = await local(row.id, "the record was removed. The watch stops work on this run").catch(() => row.run);
+        if (!run || (settled(run) ? row.gave_up : settled(row.run))) Object.assign(row, { run, gave_up: false, failures: 0, retryAt: 0 });
+      };
+      for (const id of ids) {
+        directory(id); // An invalid ID is an error of the caller, not a run to report.
+        const run = await local(id, "this workspace has no such run");
+        add(id, run, run?.state === "running");
+      }
+      let first = true, unlisted = false, progressAt = 0;
+      for (;;) {
+        if (!ids.length) {
+          try {
+            // Each record is read on its own: one damaged record must not hide the other runs.
+            const runs: RunRecord[] = [];
+            for (const name of await readdir(join(home, "runs")).catch(absent) ?? []) {
+              const run = idPattern.test(name) ? await local(name) : null;
+              if (run && (label === undefined ? !settled(run) : run.label === label)) runs.push(run);
+            }
+            // Oldest first. A run that was already running at the start gets no "started" event.
+            for (const run of runs.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))) add(run.id, run, first && run.state === "running");
+            unlisted = false;
+          } catch (error) {
+            if (first) throw error;
+            if (!unlisted) process.stderr.write(`The run list could not be read (${message(error)}). The watch continues with the runs that it has.\n`);
+            unlisted = true;
+          }
+        }
+        first = false;
+        for (const row of rows.values()) {
+          if (signal?.aborted) break;
+          await sync(row);
+          if (!open(row) || Date.now() < row.retryAt) continue;
+          const before = row.run!, since = Date.now();
+          // A watch that waits in one long call is not silent.
+          const slow = setInterval(() => process.stderr.write(`Run ${row.id}: the status call has taken ${Math.round((Date.now() - since) / 60_000)} minutes.\n`), 10 * 60_000);
+          let run: RunRecord;
+          try { run = row.run = await engine.status(row.id); }
+          catch (error) {
+            // One line for a row of failures, not one for each cycle.
+            if (row.failingSince === null) {
+              row.failingSince = Date.now();
+              process.stderr.write(`${failure(row.id, error)} The watch tries again at each cycle.\n`);
+            } else if (Date.now() - row.failingSince >= patience) { row.gave_up = true; on({ type: "gave_up", run: before, error: message(error) }); }
+            continue;
+          } finally { clearInterval(slow); }
+          row.failingSince = null;
+          const ended = run.state === "finished", fresh = ended && before.state !== "finished", collected = ended && run.collection.state === "collected";
+          if (run.state === "running" && !row.started) { row.started = true; on({ type: "started", run }); }
+          if (fresh) on({ type: "ended", run });
+          // The publication is a new step with its own attempts.
+          if (collected && (fresh || before.collection.state !== "collected")) { row.failures = 0; on({ type: "collected", run }); }
+          if (collected && run.publication.state === "published" && before.publication.state !== "published") on({ type: "published", run });
+          if (!ended || settled(run)) { row.failures = 0; continue; }
+          // The run ended and something is left: `status` tried the collection or the publication, and it failed.
+          // The attempts move apart, so a short outage of the executor does not use all of them.
+          row.retryAt = Date.now() + retry * 2 ** row.failures++;
+          on({ type: collected ? "publication_failed" : "collection_failed", run, attempt: row.failures, attempts });
+          if (row.failures >= attempts) { row.gave_up = true; on({ type: "gave_up", run, attempt: row.failures, attempts }); }
+        }
+        // The end of the watch and its result use the registry as it is now.
+        for (const row of rows.values()) await sync(row);
+        const left = [...rows.values()].filter(open);
+        if (once || signal?.aborted || !left.length) break;
+        if (Date.now() - progressAt >= 10 * 60_000) {
+          progressAt = Date.now();
+          const failing = left.filter(row => row.failingSince !== null).length;
+          process.stderr.write(`Runs watched: ${rows.size}. Not settled: ${left.length}.${failing ? ` Failing status checks: ${failing}.` : ""} A cycle starts every ${Math.round(interval / 1000)} seconds.\n`);
+        }
+        await sleep(interval, signal);
+      }
+      return [...rows.values()].map(({ id, run, gave_up }) => ({ id, run, gave_up }));
     },
     async cancel(id: string): Promise<RunRecord> {
       const record = await readRun(home, id);
@@ -191,7 +347,7 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
         // The package is a local file set, so a rebuilt record always starts uncollected.
         const record: RunRecord = { ...found, collection: { state: "pending", path: null, report: null } };
         await withRunOperation(home, record.id, async () => {
-          const existing = await readRun(home, record.id).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
+          const existing = await readRun(home, record.id).catch(absent);
           // Existing local collection and publication state is more current than the worker's record.
           if (!existing) await writeRun(home, record);
           records.push(existing ?? record);

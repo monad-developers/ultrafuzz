@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { initWorkspace, loadConfig, resolveHome } from "./config";
-import type { Publisher } from "./engine";
+import type { Publisher, WatchEvent, WatchOptions, WatchRow } from "./engine";
 import type { ExecutorSource } from "./executor";
 import { listProfiles } from "./profiles";
 import { validateRunId } from "./store";
@@ -19,6 +19,7 @@ Usage: ultrafuzz <command> [options]
   list                         List local runs
   status <id>                  Refresh a run; collect its report if it ended
   wait <id>                    Wait until a run ends and its report is collected
+  watch [id...]                Collect many runs as they end, then print a summary
   collect <id>                 Collect the local report; retry publication if enabled
   cancel <id>                  Request a stop with time to export artifacts
   recover [id]                 Rebuild records from the executor's retained storage
@@ -45,10 +46,12 @@ Launch options:
 
 Repository input JSON: {"name":"reference","repository":"https://github.com/org/repo","revision":"main"}
 Collect option: --force (download and package again)
+Watch options: --label <name> (only the runs with this label), --interval <seconds>
+  (pause between cycles; default 60, from 5 to 86400), --once (one cycle, then exit)
 Recover option: --executor <name>
 Viewer option: --port <number> (default 3000)
 
-The report is collected to this machine: status, wait, collect and list print its path.
+The report is collected to this machine: status, wait, watch, collect and list print its path.
 `;
 
 type Input = NonNullable<LaunchOptions["inputs"]>[number];
@@ -81,8 +84,32 @@ function number(value: string | undefined, name: string): number | undefined {
   if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer.`);
   return parsed;
 }
+const phase = (run: RunRecord) => run.state === "finished" ? `${run.status} (${run.end})` : run.state;
 function summary(run: RunRecord): string {
-  return `${run.id}  ${run.label}  ${run.state === "finished" ? `${run.status} (${run.end})` : run.state}`;
+  return `${run.id}  ${run.label}  ${phase(run)}`;
+}
+/** Each watch line names the repository: runs of one label differ by it. */
+const watched = (run: RunRecord) => `${run.id}  ${run.label}  ${run.source.repository}`;
+/** One line for a change that a watch saw. */
+function change({ type, run, attempt, attempts, error }: WatchEvent): string {
+  const text = {
+    started: "started",
+    ended: `ended (${run.end})`,
+    collected: run.collection.report ? `collected: ${run.collection.report}` : run.collection.path ? `collected, no report. Evidence: ${run.collection.path}` : "did not start, nothing to collect",
+    collection_failed: `collection failed (attempt ${attempt} of ${attempts}): ${run.collection.error ?? "unknown error"}`,
+    published: `published: ${run.publication.pr_url}`,
+    publication_failed: `publication failed (attempt ${attempt} of ${attempts}): ${run.publication.error ?? "unknown error"}`,
+    gave_up: attempt ? `gave up after ${attempt} failed attempts; use collect to try again` : `gave up, the status check failed for too long: ${error}`,
+  }[type];
+  return `${watched(run)}  ${text}`;
+}
+/** A failed collection or requested publication, a run that the watch gave up, or an ID without a usable record. */
+const unsuccessful = ({ run, gave_up }: WatchRow) => !run || gave_up || run.collection.state === "failed" || run.publication.state === "failed";
+/** One line per run for the watch summary: the outcome, a failed step, and the report path or "no report". */
+function result({ id, run, gave_up }: WatchRow): string {
+  if (!run) return `${id}  unknown run`;
+  const failed = run.collection.state === "failed" ? "collection failed" : run.publication.state === "failed" ? "publication failed" : gave_up ? "status check failed" : "";
+  return [watched(run), phase(run), failed, run.collection.report ?? "no report", run.publication.pr_url ?? ""].filter(Boolean).join("  ");
 }
 /** One line per run for list output: the local report path is the last column. */
 function line(run: RunRecord): string {
@@ -111,13 +138,13 @@ function executorName(value: string | undefined): ExecutorName | undefined {
   return value as ExecutorName | undefined;
 }
 
-/** `executors` and `publisher` replace the real adapters and the GitHub publisher in tests; the command line never sets them. */
-export async function main(args = process.argv.slice(2), executors?: ExecutorSource, publisher?: Publisher): Promise<void> {
+/** `executors`, `publisher` and `timing` replace the real adapters, the GitHub publisher and the pauses of `watch` in tests; the command line never sets them. */
+export async function main(args = process.argv.slice(2), executors?: ExecutorSource, publisher?: Publisher, timing: Pick<WatchOptions, "sleep" | "retry"> = {}): Promise<void> {
   let jsonOutput = args.includes("--json");
   try {
     const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
       home: { type: "string" }, json: { type: "boolean" }, help: { type: "boolean", short: "h" }, version: { type: "boolean" },
-      repository: { type: "string" }, label: { type: "string" }, profile: { type: "string" }, harness: { type: "string" }, model: { type: "string" }, effort: { type: "string" }, properties: { type: "string" }, "key-env": { type: "string" }, timeout: { type: "string" }, executor: { type: "string" }, revision: { type: "string" }, publish: { type: "boolean" }, force: { type: "boolean" }, input: { type: "string", multiple: true }, inputs: { type: "string" }, port: { type: "string" },
+      repository: { type: "string" }, label: { type: "string" }, profile: { type: "string" }, harness: { type: "string" }, model: { type: "string" }, effort: { type: "string" }, properties: { type: "string" }, "key-env": { type: "string" }, timeout: { type: "string" }, executor: { type: "string" }, revision: { type: "string" }, publish: { type: "boolean" }, force: { type: "boolean" }, interval: { type: "string" }, once: { type: "boolean" }, input: { type: "string", multiple: true }, inputs: { type: "string" }, port: { type: "string" },
     } });
     jsonOutput = !!values.json;
     const emit = (command: string, value: Record<string, unknown>, human: string) => {
@@ -126,12 +153,12 @@ export async function main(args = process.argv.slice(2), executors?: ExecutorSou
     if (values.version) { emit("version", { version: VERSION }, VERSION); return; }
     if (values.help || !positionals.length) { emit("help", { help }, help.trimEnd()); return; }
     const [command, argument, ...extra] = positionals;
-    const commands = ["init", "launch", "list", "status", "wait", "collect", "cancel", "recover", "profiles", "viewer"];
+    const commands = ["init", "launch", "list", "status", "wait", "watch", "collect", "cancel", "recover", "profiles", "viewer"];
     if (!commands.includes(command!)) throw new Error(`Unknown command ${command}. Run ultrafuzz --help.`);
-    if (extra.length) throw new Error("Unexpected positional arguments.");
+    if (extra.length && command !== "watch") throw new Error("Unexpected positional arguments.");
     const flags: Record<string, string[]> = {
       launch: ["repository", "label", "profile", "harness", "model", "effort", "properties", "key-env", "timeout", "input", "inputs", "executor", "publish"],
-      collect: ["force"], recover: ["executor"], viewer: ["port"],
+      collect: ["force"], recover: ["executor"], viewer: ["port"], watch: ["label", "interval", "once"],
     };
     for (const key of Object.keys(values)) {
       if (["home", "json", "help", "version"].includes(key)) continue;
@@ -151,8 +178,45 @@ export async function main(args = process.argv.slice(2), executors?: ExecutorSou
       const { serveDashboard } = await import("./dashboard");
       await serveDashboard(home, port, executors, publisher); emit("viewer", { url: `http://127.0.0.1:${port}` }, `Dashboard: http://127.0.0.1:${port}`); return;
     }
-    const { createEngine } = await import("./engine");
+    const { createEngine, settled } = await import("./engine");
     const engine = await createEngine(home, executors, publisher);
+    if (command === "watch") {
+      const ids = [...new Set(positionals.slice(1))];
+      if (ids.length && values.label !== undefined) throw new Error("watch takes run IDs or --label, not both.");
+      ids.forEach(validateRunId);
+      const seconds = number(values.interval, "--interval") ?? 60;
+      if (seconds < 5 || seconds > 86_400) throw new Error("--interval must be between 5 and 86400 seconds.");
+      // The first signal ends the watch after the run that is being refreshed. Some senders repeat a signal at once:
+      // `timeout` signals the process and then its process group. So only a later signal ends the process.
+      const controller = new AbortController();
+      let stopped: NodeJS.Signals | undefined, stoppedAt = 0;
+      const code = (signal: NodeJS.Signals) => signal === "SIGINT" ? 130 : 143;
+      const stop = (signal: NodeJS.Signals) => {
+        if (!stopped) { stopped = signal; stoppedAt = Date.now(); controller.abort(); }
+        else if (Date.now() - stoppedAt > 2000) process.exit(code(signal));
+      };
+      const fields = (run: RunRecord) => ({ ...outcome(run), label: run.label, repository: run.source.repository });
+      const at = () => new Date().toISOString();
+      process.on("SIGINT", stop); process.on("SIGTERM", stop);
+      let rows: WatchRow[];
+      try {
+        rows = await engine.watch({ ...timing, ids, label: values.label, interval: seconds * 1000, once: !!values.once, signal: controller.signal,
+          on: event => {
+            const { type, run, attempt, attempts, error } = event;
+            const failure = attempt ? { attempt, attempts, error: (run.collection.state === "failed" ? run.collection.error : run.publication.error) ?? null } : error ? { error } : {};
+            emit("watch", { type, at: at(), ...fields(run), ...failure }, change(event));
+          } });
+      } finally { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
+      const known = rows.filter(row => row.run), failed = rows.filter(unsuccessful).length, done = known.filter(row => settled(row.run!)).length;
+      const reports = known.filter(row => row.run!.collection.report).length, pending = rows.length - done - failed;
+      emit("watch", { type: "summary", at: at(), total: rows.length, reports, settled: done, failed, not_settled: pending, runs: known.map(row => ({ ...fields(row.run!), settled: settled(row.run!), gave_up: row.gave_up })), unknown: rows.filter(row => !row.run).map(row => row.id) },
+        rows.length ? [`Summary. Runs: ${rows.length}. With a report: ${reports}. Settled: ${done}. Watch failures: ${failed}. Not settled: ${pending}.`, ...rows.map(result)].join("\n") : "No runs to watch.");
+      // As for wait and collect: a failed audit is a result. A failed collection or requested publication fails the command.
+      // A watch that a signal stopped before every run was settled ends with the code of that signal.
+      if (failed) process.exitCode = 1;
+      else if (stopped && pending) process.exitCode = code(stopped);
+      return;
+    }
     if (command === "launch") {
       if (argument && values.repository && argument !== values.repository) throw new Error("Specify the repository once.");
       const repository = values.repository || argument;

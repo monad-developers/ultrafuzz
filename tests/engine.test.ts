@@ -1,9 +1,9 @@
 import { afterEach, expect, setSystemTime, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initWorkspace } from "../src/config";
-import { createEngine, settled } from "../src/engine";
+import { LOST_AFTER, WATCH_ATTEMPTS, createEngine, settled, type WatchOptions } from "../src/engine";
 import type { Executor, Observation } from "../src/executor";
 import { dockerInstructions } from "../src/modal";
 import { readRun, writeRun } from "../src/store";
@@ -310,6 +310,413 @@ test("wait keeps polling after a failed status call and gives up only after a lo
   await expect(engine.wait("20200101-000000-00000000")).rejects.toThrow();
 });
 
+/**
+ * Run a watch without a real pause: `between` runs in place of each pause, with the number of the cycle that ended
+ * and the events so far. A failed collection or publication is tried again in the next cycle, unless `retry` is set.
+ * Events come back as "<label> <type> [attempt]", next to the lines that the watch wrote to stderr.
+ */
+async function watching(engine: Awaited<ReturnType<typeof createEngine>>, options: WatchOptions = {}, between: (cycle: number, events: string[]) => unknown = () => {}) {
+  const events: string[] = [], lines: string[] = [], write = process.stderr.write;
+  let cycles = 0;
+  process.stderr.write = ((chunk: string | Uint8Array) => { lines.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  try {
+    const rows = await engine.watch({ retry: 0, ...options, on: ({ type, run, attempt }) => { events.push([run.label, type, attempt].filter(Boolean).join(" ")); },
+      sleep: async () => { if (++cycles > 20) throw new Error("The watch did not end."); await between(cycles, events); } });
+    return { rows, events, lines, cycles };
+  } finally { process.stderr.write = write; }
+}
+
+test("watch collects each run in the cycle after it ended, and a run without a report is settled", async () => {
+  const { home, cloud, engine } = await fixture({ results: false });
+  const first = await engine.launch({ repository: "example", label: "first" });
+  const empty = await engine.launch({ repository: "example", label: "empty" });
+  const slow = await engine.launch({ repository: "example", label: "slow" });
+  // The local record of the third run is still in the launch.
+  await writeRun(home, { ...slow, state: "launching" });
+  const seen: number[] = [];
+  const { rows, events, lines, cycles } = await watching(engine, { interval: 90_000 }, (cycle, soFar) => {
+    seen.push(soFar.length);
+    if (cycle === 1) cloud.finish(first.id, "# Report");
+    if (cycle === 2) cloud.finish(empty.id);
+    if (cycle === 3) cloud.finish(slow.id, "# Report");
+  });
+  // A run that was already running at the start has no "started" event.
+  expect(events).toEqual(["slow started", "first ended", "first collected", "empty ended", "empty collected", "slow ended", "slow collected"]);
+  expect(seen).toEqual([1, 3, 5]);
+  expect(cycles).toBe(3);
+  // A failed audit without a report is a result: the run is settled and the watch did not give it up.
+  expect(rows.map(row => [row.id, row.run!.status, settled(row.run!), row.gave_up])).toEqual([[first.id, "succeeded", true, false], [empty.id, "failed", true, false], [slow.id, "succeeded", true, false]]);
+  expect(rows[0]!.run!.collection.report).toBe(join(home, "runs", first.id, "artifacts/raw/report.md"));
+  expect(rows[1]!.run!.collection).toEqual({ state: "collected", path: join(home, "runs", empty.id, "artifacts"), report: null });
+  // A settled run is not refreshed again: 2, 3 and 4 status calls.
+  expect(cloud.observations).toBe(9);
+  // A watch observes and collects. It starts and cancels nothing.
+  expect([cloud.launches, cloud.cancelled.length, cloud.downloads]).toEqual([3, 0, 3]);
+  expect(lines).toEqual(["Runs watched: 3. Not settled: 3. A cycle starts every 90 seconds.\n"]);
+});
+
+test("watch continues after failed status calls and reports each row of failures once", async () => {
+  const { cloud, engine } = await fixture({ results: false });
+  const flaky = await engine.launch({ repository: "example", label: "flaky" });
+  const busy = await engine.launch({ repository: "example", label: "busy" });
+  const status = engine.status, calls: Record<string, number> = {};
+  engine.status = async id => {
+    const call = calls[id] = (calls[id] ?? 0) + 1;
+    // The network fails in cycles 1, 2 and 4. Another command holds the lock of the second run in cycle 1.
+    if (id === flaky.id && [1, 2, 4].includes(call)) throw new Error("14 UNAVAILABLE: connection lost");
+    if (id === busy.id && call === 1) throw Object.assign(new Error("Lock file is already being held"), { code: "ELOCKED" });
+    return status(id);
+  };
+  const { rows, events, lines, cycles } = await watching(engine, {}, cycle => {
+    if (cycle === 4) { cloud.finish(flaky.id, "# Report"); cloud.finish(busy.id, "# Report"); }
+  });
+  expect(cycles).toBe(4);
+  expect(calls).toEqual({ [flaky.id]: 5, [busy.id]: 5 });
+  expect(events).toEqual(["flaky ended", "flaky collected", "busy ended", "busy collected"]);
+  expect(rows.every(row => settled(row.run!) && !row.gave_up)).toBe(true);
+  const failed = `Run ${flaky.id}: the status check failed (14 UNAVAILABLE: connection lost). The watch tries again at each cycle.\n`;
+  expect(lines).toEqual([
+    failed,
+    `Run ${busy.id}: another command is working on this run. The watch tries again at each cycle.\n`,
+    "Runs watched: 2. Not settled: 2. Failing status checks: 2. A cycle starts every 60 seconds.\n",
+    failed, // Cycle 2 added no line. Cycle 3 worked, so cycle 4 starts a new row of failures.
+  ]);
+});
+
+test("watch tries a failed collection and a failed publication again in later cycles", async () => {
+  const { cloud, engine, attempts, publicationFailure } = await fixture();
+  const run = await engine.launch({ repository: "example", label: "retry", publish: true });
+  cloud.finish(run.id, "# Report");
+  cloud.downloadFailure = "Simulated transport failure";
+  publicationFailure(true);
+  const { rows, events, cycles } = await watching(engine, {}, cycle => {
+    if (cycle === 2) cloud.downloadFailure = undefined;
+    if (cycle === 4) publicationFailure(false);
+  });
+  expect(events).toEqual(["retry ended", "retry collection_failed 1", "retry collection_failed 2", "retry collected", "retry publication_failed 1", "retry publication_failed 2", "retry published"]);
+  expect(cycles).toBe(4);
+  // The publication was tried again from the local package, without a new download.
+  expect([cloud.downloads, attempts()]).toEqual([3, 3]);
+  expect(rows).toMatchObject([{ id: run.id, gave_up: false, run: { status: "succeeded", collection: { state: "collected" }, publication: { state: "published" } } }]);
+  expect(settled(rows[0]!.run!)).toBe(true);
+});
+
+test("watch gives up a run after five failed collections in a row and continues with the other runs", async () => {
+  const { cloud, engine } = await fixture({ results: false });
+  const broken = await engine.launch({ repository: "example", label: "broken" });
+  const other = await engine.launch({ repository: "example", label: "other" });
+  cloud.finish(broken.id, "# Report");
+  const download = cloud.download.bind(cloud);
+  let failed = 0;
+  cloud.download = async (record, destination) => {
+    if (record.id !== broken.id) return download(record, destination);
+    failed++;
+    throw new Error("Store is gone");
+  };
+  const { rows, events, cycles } = await watching(engine, {}, cycle => { if (cycle === 7) cloud.finish(other.id, "# Report"); });
+  expect(WATCH_ATTEMPTS).toBe(5);
+  expect(events).toEqual(["broken ended", ...[1, 2, 3, 4, 5].map(attempt => `broken collection_failed ${attempt}`), "broken gave_up 5", "other ended", "other collected"]);
+  // Cycles 6 to 8 did not try the first run again.
+  expect([failed, cycles]).toEqual([5, 7]);
+  expect(rows).toMatchObject([
+    { id: broken.id, gave_up: true, run: { state: "finished", collection: { state: "failed", error: "Store is gone" } } },
+    { id: other.id, gave_up: false, run: { collection: { state: "collected" } } },
+  ]);
+  // The limit is an option. A watch whose only run was given up ends.
+  const short = await watching(engine, { ids: [broken.id], attempts: 2 });
+  expect(short.events).toEqual(["broken collection_failed 1", "broken collection_failed 2", "broken gave_up 2"]);
+  expect([failed, short.cycles, short.rows[0]!.gave_up]).toEqual([7, 1, true]);
+  // Only failures in a row count: a run that is active again between two failures starts a new count.
+  const status = engine.status;
+  let call = 0;
+  engine.status = async id => ++call === 2 ? { ...await status(id), state: "running" } : status(id);
+  const again = await watching(engine, { ids: [broken.id], attempts: 2 });
+  expect(again.events).toEqual(["broken collection_failed 1", "broken started", "broken ended", "broken collection_failed 1", "broken collection_failed 2", "broken gave_up 2"]);
+});
+
+test("watch selects runs by ID or by label, does one cycle with once, and ends at once with nothing to watch", async () => {
+  const { cloud, engine } = await fixture({ results: false });
+  const done = await engine.launch({ repository: "example", label: "nightly" });
+  cloud.finish(done.id, "# Report");
+  await engine.status(done.id);
+  const active = await engine.launch({ repository: "example", label: "nightly" });
+  const other = await engine.launch({ repository: "example", label: "other" });
+  // Without IDs and without a label: every run that is not settled. `once` does one cycle and no pause.
+  let observed = cloud.observations;
+  const once = await watching(engine, { once: true });
+  expect(once.rows.map(row => [row.id, row.run!.state])).toEqual([[active.id, "running"], [other.id, "running"]]);
+  expect([once.cycles, cloud.observations - observed, once.events.length, once.lines.length]).toEqual([0, 2, 0, 0]);
+
+  // IDs: these runs only, also a settled one. An unknown ID is reported and does not keep the watch alive.
+  cloud.finish(other.id, "# Report");
+  const unknown = "20200101-000000-00000000";
+  observed = cloud.observations;
+  const byId = await watching(engine, { ids: [unknown, other.id, done.id] });
+  expect(byId.rows.map(row => [row.id, row.run?.collection.state ?? null, row.gave_up])).toEqual([[unknown, null, false], [other.id, "collected", false], [done.id, "collected", false]]);
+  expect(byId.events).toEqual(["other ended", "other collected"]);
+  expect(byId.lines).toEqual([`Run ${unknown}: this workspace has no such run.\n`]);
+  // The run that was not named is still active, and the watch did not wait for it.
+  expect([byId.cycles, cloud.observations - observed]).toEqual([0, 1]);
+
+  // A label: all runs of that label, and no other run.
+  const late = await engine.launch({ repository: "example", label: "other" });
+  observed = cloud.observations;
+  const labelled = await watching(engine, { label: "nightly" }, cycle => { if (cycle === 2) cloud.finish(active.id, "# Report"); });
+  expect(labelled.rows.map(row => row.id)).toEqual([done.id, active.id]);
+  expect(labelled.events).toEqual(["nightly ended", "nightly collected"]);
+  expect([labelled.cycles, cloud.observations - observed]).toEqual([2, 3]);
+  expect((await engine.list()).find(run => run.id === late.id)).toMatchObject({ state: "running", last_observed_at: null });
+
+  // Nothing to watch: a label without runs, and a registry in which every run is settled.
+  expect(await watching(engine, { label: "none" })).toEqual({ rows: [], events: [], lines: [], cycles: 0 });
+  cloud.finish(late.id);
+  await engine.status(late.id);
+  observed = cloud.observations;
+  expect(await watching(engine)).toEqual({ rows: [], events: [], lines: [], cycles: 0 });
+  expect(cloud.observations).toBe(observed);
+});
+
+test("watch picks up a run that is launched while it runs", async () => {
+  const { cloud, engine } = await fixture({ results: false });
+  const early = await engine.launch({ repository: "example", label: "early" });
+  let late: RunRecord | undefined;
+  const { rows, events, cycles } = await watching(engine, {}, async cycle => {
+    if (cycle === 1) { late = await engine.launch({ repository: "example", label: "late" }); cloud.finish(early.id, "# Report"); }
+    if (cycle === 3) cloud.finish(late!.id, "# Report");
+  });
+  expect(events).toEqual(["early ended", "early collected", "late started", "late ended", "late collected"]);
+  expect(cycles).toBe(3);
+  expect(rows.map(row => [row.id, settled(row.run!)])).toEqual([[early.id, true], [late!.id, true]]);
+  // With IDs the set is fixed: a new run is not picked up.
+  const fixed = await engine.launch({ repository: "example", label: "fixed" });
+  let extra: RunRecord | undefined;
+  const named = await watching(engine, { ids: [fixed.id] }, async cycle => {
+    if (cycle === 1) { extra = await engine.launch({ repository: "example", label: "extra" }); cloud.finish(fixed.id, "# Report"); }
+  });
+  expect(named.rows.map(row => row.id)).toEqual([fixed.id]);
+  expect(named.events).toEqual(["fixed ended", "fixed collected"]);
+  expect((await engine.list()).find(run => run.id === extra!.id)!.last_observed_at).toBeNull();
+});
+
+test("a stop signal ends the watch after the run that is being refreshed, and ends the pause", async () => {
+  const { home, cloud, engine } = await fixture({ results: false });
+  const first = await engine.launch({ repository: "example", label: "first" });
+  const second = await engine.launch({ repository: "example", label: "second" });
+  cloud.finish(first.id, "# Report"); cloud.finish(second.id, "# Report");
+  // The signal arrives during the download of the first run. That collection is completed. The second run is not started.
+  const during = new AbortController();
+  cloud.onDownload = async () => during.abort();
+  const stopped = await watching(engine, { signal: during.signal });
+  expect(stopped.events).toEqual(["first ended", "first collected"]);
+  expect(stopped.rows.map(row => [row.id, row.run!.state, row.run!.collection.state])).toEqual([[first.id, "finished", "collected"], [second.id, "running", "pending"]]);
+  expect(await readFile(join(home, "runs", first.id, "artifacts/raw/report.md"), "utf8")).toBe("# Report");
+  expect([cloud.observations, cloud.downloads, stopped.cycles]).toEqual([1, 1, 0]);
+
+  // A signal during the pause: no new cycle follows.
+  cloud.onDownload = undefined;
+  const third = await engine.launch({ repository: "example", label: "third" });
+  const asleep = new AbortController();
+  const paused = await watching(engine, { signal: asleep.signal }, () => asleep.abort());
+  expect(paused.events).toEqual(["second ended", "second collected"]);
+  expect(paused.rows.map(row => [row.id, row.run!.state])).toEqual([[second.id, "finished"], [third.id, "running"]]);
+  expect([cloud.observations, paused.cycles]).toEqual([3, 1]);
+
+  // The pause of the command line is an hour here, and the signal ends it. The watch writes its progress line just before the pause.
+  const real = new AbortController(), write = process.stderr.write;
+  process.stderr.write = (() => { setTimeout(() => real.abort()); return true; }) as typeof process.stderr.write;
+  try { expect((await engine.watch({ interval: 3_600_000, signal: real.signal })).map(row => row.id)).toEqual([third.id]); }
+  finally { process.stderr.write = write; }
+  expect(cloud.observations).toBe(4);
+});
+
+test("watch writes a progress line at most once in ten minutes", async () => {
+  const { engine } = await fixture({ results: false });
+  await engine.launch({ repository: "example", label: "long" });
+  const stop = new AbortController();
+  // Each pause is four minutes long. The watch is stopped in the seventh pause, 24 minutes after the first line.
+  const { lines, cycles } = await watching(engine, { signal: stop.signal }, cycle => {
+    setSystemTime(new Date(Date.now() + 4 * 60_000));
+    if (cycle === 7) stop.abort();
+  });
+  expect(cycles).toBe(7);
+  expect(lines).toEqual(Array(3).fill("Runs watched: 1. Not settled: 1. A cycle starts every 60 seconds.\n"));
+});
+
+test.skipIf(process.getuid?.() === 0)("watch fails at once when the run list cannot be read, and continues when that happens later", async () => {
+  const { home, cloud, engine } = await fixture({ results: false });
+  const run = await engine.launch({ repository: "example", label: "listed" }), runs = join(home, "runs");
+  try {
+    // The registry cannot be read in the second cycle.
+    const { rows, events, lines } = await watching(engine, {}, async cycle => {
+      if (cycle === 1) await chmod(runs, 0o000);
+      if (cycle === 2) { await chmod(runs, 0o700); cloud.finish(run.id, "# Report"); }
+    });
+    expect(events).toEqual(["listed ended", "listed collected"]);
+    expect(rows.map(row => settled(row.run!))).toEqual([true]);
+    expect(lines.slice(1).map(line => line.replace(/\(.*\)/, "(...)"))).toEqual([
+      "The run list could not be read (...). The watch continues with the runs that it has.\n",
+      `Run ${run.id}: the status check failed (...). The watch tries again at each cycle.\n`,
+    ]);
+    await chmod(runs, 0o000);
+    await expect(engine.watch()).rejects.toThrow("EACCES");
+  } finally { await chmod(runs, 0o700); }
+});
+
+test("a damaged or removed record ends the work on that run only", async () => {
+  const { home, cloud, engine } = await fixture({ results: false });
+  const good = await engine.launch({ repository: "example", label: "good" });
+  const cut = await engine.launch({ repository: "example", label: "cut" });
+  const gone = await engine.launch({ repository: "example", label: "gone" });
+  // The cut-off record of an old run is in the registry from the start.
+  const old = "20200101-000000-0badbad0", record = (id: string) => join(home, "runs", id, "run.json");
+  await mkdir(join(home, "runs", old));
+  await writeFile(record(old), '{"schema":');
+  let late: RunRecord | undefined;
+  const { rows, events, lines, cycles } = await watching(engine, {}, async cycle => {
+    if (cycle === 1) {
+      await writeFile(record(cut.id), '{"schema":');
+      await rm(join(home, "runs", gone.id), { recursive: true });
+      late = await engine.launch({ repository: "example", label: "late" });
+    }
+    if (cycle === 2) { cloud.finish(good.id, "# Report"); cloud.finish(late!.id, "# Report"); }
+  });
+  // The other runs are collected, also the one that was launched after the damage.
+  expect(events).toEqual(["late started", "good ended", "good collected", "late ended", "late collected"]);
+  expect(cycles).toBe(2);
+  expect(rows.map(row => [row.id, row.run ? settled(row.run) : null])).toEqual([[good.id, true], [cut.id, null], [gone.id, null], [late!.id, true]]);
+  // One line for each of the three runs, not one for each cycle.
+  expect(lines.filter(line => !line.startsWith("Runs watched")).map(line => line.replace(/\(.*\)/, "(...)"))).toEqual([
+    `Run ${old}: the record cannot be read (...). The watch does not work on this run.\n`,
+    `Run ${cut.id}: the record cannot be read (...). The watch does not work on this run.\n`,
+    `Run ${gone.id}: the record was removed. The watch stops work on this run.\n`,
+  ]);
+  // The watch did not create the removed directory again.
+  expect(await readdir(join(home, "runs"))).not.toContain(gone.id);
+
+  // IDs and a label: the damaged records do not stop the watch of the good run.
+  const byId = await watching(engine, { ids: [old, good.id, cut.id, gone.id] });
+  expect(byId.rows.map(row => [row.id, row.run?.collection.state ?? null])).toEqual([[old, null], [good.id, "collected"], [cut.id, null], [gone.id, null]]);
+  expect(byId.lines.map(line => line.replace(/\(.*\)/, "(...)"))).toEqual([
+    `Run ${old}: the record cannot be read (...). The watch does not work on this run.\n`,
+    `Run ${cut.id}: the record cannot be read (...). The watch does not work on this run.\n`,
+    `Run ${gone.id}: this workspace has no such run.\n`,
+  ]);
+  expect((await watching(engine, { label: "good" })).rows.map(row => row.id)).toEqual([good.id]);
+  await expect(engine.watch({ ids: ["not-an-id"] })).rejects.toThrow("Invalid run id");
+});
+
+test("watch moves the attempts of a failed collection apart: 2, 4, 8 and 16 minutes", async () => {
+  const { cloud, engine } = await fixture({ results: false });
+  const run = await engine.launch({ repository: "example", label: "outage" });
+  cloud.finish(run.id, "# Report");
+  cloud.downloadFailure = "Simulated transport failure";
+  const tried: number[] = [];
+  // Each pause is two minutes long, so cycle n starts 2(n - 1) minutes after the first attempt. `retry` has its default.
+  const { rows, events, cycles } = await watching(engine, { retry: undefined }, cycle => {
+    if (cloud.downloads > tried.length) tried.push(cycle);
+    setSystemTime(new Date(Date.now() + 2 * 60_000));
+  });
+  // The attempts are at 0, 2, 6, 14 and 30 minutes. The watch ends in cycle 16, with the fifth one.
+  expect(tried).toEqual([1, 2, 4, 8]);
+  expect([cloud.downloads, cycles, rows[0]!.gave_up]).toEqual([5, 15, true]);
+  expect(events).toEqual(["outage ended", ...[1, 2, 3, 4, 5].map(attempt => `outage collection_failed ${attempt}`), "outage gave_up 5"]);
+});
+
+test("watch gives a run up only when each status call for it failed for two hours", async () => {
+  const { cloud, engine } = await fixture({ results: false });
+  const flaky = await engine.launch({ repository: "example", label: "flaky" });
+  const stuck = await engine.launch({ repository: "example", label: "stuck" });
+  const status = engine.status;
+  let outage = true;
+  engine.status = async id => {
+    if (id === stuck.id || outage) throw new Error("credentials are absent");
+    return status(id);
+  };
+  // Each pause is ten minutes long. The first run fails 12 times in a row, the second one always.
+  const { rows, events, lines, cycles } = await watching(engine, {}, cycle => {
+    setSystemTime(new Date(Date.now() + 10 * 60_000));
+    if (cycle === 12) outage = false;
+    if (cycle === 13) cloud.finish(flaky.id, "# Report");
+  });
+  // The number of failed status calls is not a limit. Two hours of them is one, and the other run continues.
+  expect(events).toEqual(["stuck gave_up", "flaky ended", "flaky collected"]);
+  expect(cycles).toBe(13);
+  expect(rows.map(row => [row.id, row.run!.state, row.gave_up])).toEqual([[flaky.id, "finished", false], [stuck.id, "running", true]]);
+  expect(lines.filter(line => line.includes("status check failed"))).toEqual([flaky.id, stuck.id].map(id => `Run ${id}: the status check failed (credentials are absent). The watch tries again at each cycle.\n`));
+});
+
+test("watch refreshes a run again when a slow launch revived it after a lost verdict", async () => {
+  const { cloud, engine } = await fixture({ results: false });
+  const other = await engine.launch({ repository: "example", label: "other" });
+  // The submission of the second run takes 31 minutes. In that time the platform does not know the run.
+  let submitting = false, release = () => {}, launching: Promise<RunRecord> | undefined, slow: RunRecord | undefined;
+  const observe = cloud.observe.bind(cloud), submitted = Promise.withResolvers<void>();
+  cloud.observe = async record => record.label === "slow" && submitting ? { code: undefined, complete: null } : observe(record);
+  cloud.onLaunch = async record => {
+    if (record.label !== "slow") return;
+    submitting = true;
+    setSystemTime(new Date(Date.now() + 31 * 60_000));
+    submitted.resolve();
+    await new Promise<void>(resolve => { release = resolve; });
+    submitting = false;
+  };
+  const { rows, events } = await watching(engine, {}, async cycle => {
+    if (cycle === 1) { launching = engine.launch({ repository: "example", label: "slow" }); await submitted.promise; }
+    if (cycle === 2) { release(); slow = await launching; }
+    if (cycle === 3) { cloud.finish(other.id, "# Report"); cloud.finish(slow!.id, "# Report"); }
+  });
+  // Cycle 2 ended the run as lost and collected an empty store. The launch then dropped that verdict.
+  expect(events).toEqual(["slow ended", "slow collected", "slow started", "other ended", "other collected", "slow ended", "slow collected"]);
+  expect(rows.map(row => [row.id, row.run!.end, row.run!.status, settled(row.run!)])).toEqual([[other.id, "completed", "succeeded", true], [slow!.id, "completed", "succeeded", true]]);
+  expect(await readFile(rows[1]!.run!.collection.report!, "utf8")).toBe("# Report");
+});
+
+test("a run that the watch gave up is settled in the result when another command collected it", async () => {
+  const { cloud, engine } = await fixture({ results: false });
+  const broken = await engine.launch({ repository: "example", label: "broken" });
+  const other = await engine.launch({ repository: "example", label: "other" });
+  cloud.finish(broken.id, "# Report");
+  const download = cloud.download.bind(cloud);
+  let repaired = false;
+  cloud.download = async (record, destination) => {
+    if (record.id === broken.id && !repaired) throw new Error("Store is not ready");
+    // The store works again, and `collect` is used for the first run while the watch collects the last run.
+    if (record.id === other.id) { repaired = true; await engine.collect(broken.id); }
+    return download(record, destination);
+  };
+  const { rows, events } = await watching(engine, { attempts: 2 }, cycle => { if (cycle === 2) cloud.finish(other.id, "# Report"); });
+  expect(events).toEqual(["broken ended", "broken collection_failed 1", "broken collection_failed 2", "broken gave_up 2", "other ended", "other collected"]);
+  expect(rows.map(row => [row.id, row.gave_up, settled(row.run!), !!row.run!.collection.report])).toEqual([[broken.id, false, true, true], [other.id, false, true, true]]);
+});
+
+test("watch writes a line when one status call takes long", async () => {
+  const { engine } = await fixture({ results: false });
+  const run = await engine.launch({ repository: "example", label: "long" });
+  const status = engine.status, timers = { set: globalThis.setInterval, clear: globalThis.clearInterval };
+  const started: Array<[() => void, number]> = [], cleared: unknown[] = [];
+  // The call takes 20 minutes. The timer of the watch runs once in that time.
+  engine.status = async id => { setSystemTime(new Date(Date.now() + 20 * 60_000)); started[0]![0](); return status(id); };
+  globalThis.setInterval = ((callback: () => void, ms: number) => { started.push([callback, ms]); return "timer"; }) as unknown as typeof setInterval;
+  globalThis.clearInterval = ((timer: unknown) => { cleared.push(timer); }) as typeof clearInterval;
+  try {
+    const { lines } = await watching(engine, { once: true });
+    expect(lines).toEqual([`Run ${run.id}: the status call has taken 20 minutes.\n`]);
+    expect([started.map(([, ms]) => ms), cleared]).toEqual([[10 * 60_000], ["timer"]]);
+  } finally { Object.assign(globalThis, { setInterval: timers.set, clearInterval: timers.clear }); }
+});
+
+test("the pause of a watch is real, also for an interval that is too long for a timer", async () => {
+  const { cloud, engine } = await fixture({ results: false });
+  await engine.launch({ repository: "example", label: "long" });
+  const stop = new AbortController(), write = process.stderr.write;
+  process.stderr.write = (() => true) as typeof process.stderr.write;
+  setTimeout(() => stop.abort(), 300);
+  // A timer cannot hold 2^31 ms. Without a limit that pause would end at once, and the watch would not pause at all.
+  try { await engine.watch({ interval: 2 ** 31, signal: stop.signal }); }
+  finally { process.stderr.write = write; }
+  expect(cloud.observations).toBe(1);
+});
+
 test("an executor without a config table is rejected before launch and recovery", async () => {
   const { cloud, modal, engine, requested } = await fixture({ defaults: 'executor="modal"\n', tables: modalTable });
   await expect(engine.launch({ repository: "example", label: "none", executor: "docker" })).rejects.toThrow("Executor docker is not configured. Add a [docker] table");
@@ -389,7 +796,29 @@ test("a runtime that exits or disappears without a completion record ends the ru
   expect(during).toMatchObject({ state: "launching", status: "pending", end: null, collection: { state: "pending" } });
   expect(cloud.downloads).toBe(1);
   expect(lost.state).toBe("running");
-  const gone = await engine.status(lost.id);
+  // One "unknown" answer does not end a running run: other credentials give that answer for every run, and "lost" is final.
+  const lines: string[] = [], write = process.stderr.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => { lines.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  let gone: RunRecord;
+  try {
+    const doubt = await engine.status(lost.id);
+    expect(doubt).toMatchObject({ state: "running", status: "pending", end: null, finished_at: null });
+    expect(Date.parse(doubt.unknown_since!)).toBeGreaterThan(0);
+    expect(await engine.status(lost.id)).toMatchObject({ state: "running", unknown_since: doubt.unknown_since });
+    expect(cloud.downloads).toBe(1);
+    // An answer that knows the run again starts the count anew.
+    cloud.observation = { code: null, runtime_id: "sb-back", complete: null };
+    expect((await engine.status(lost.id)).unknown_since).toBeUndefined();
+    cloud.observation = { code: undefined, complete: null };
+    const again = await engine.status(lost.id);
+    expect(again.state).toBe("running");
+    setSystemTime(new Date(Date.parse(again.unknown_since!) + LOST_AFTER - 1000));
+    expect((await engine.status(lost.id)).state).toBe("running");
+    // The same answer for 30 minutes ends the run.
+    setSystemTime(new Date(Date.parse(again.unknown_since!) + LOST_AFTER + 1000));
+    gone = await engine.status(lost.id);
+  } finally { process.stderr.write = write; setSystemTime(); }
+  expect(lines).toEqual(Array(2).fill(`Run ${lost.id}: the docker executor does not know this run. Check the credentials and the environment of this command. The run is recorded as lost if the answer stays the same for 30 minutes.\n`));
   expect(gone).toMatchObject({ state: "finished", status: "failed", end: "lost", exit_code: null, collection: { state: "collected" } });
   expect(cloud.downloads).toBe(2);
 

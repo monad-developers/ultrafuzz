@@ -1,10 +1,10 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setSystemTime, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main } from "../src/cli";
 import { initWorkspace } from "../src/config";
-import type { Publisher } from "../src/engine";
+import type { Publisher, WatchOptions } from "../src/engine";
 import type { ExecutorSource } from "../src/executor";
 import { writeRun } from "../src/store";
 import type { RunRecord } from "../src/types";
@@ -15,7 +15,8 @@ afterEach(async () => {
   if (previousRoot === undefined) delete process.env.ULTRAFUZZ_PROFILE_DIR;
   else process.env.ULTRAFUZZ_PROFILE_DIR = previousRoot;
   delete process.env.ULTRAFUZZ_CLI_TEST_KEY;
-  executors = noExecutor; publisher = undefined;
+  executors = noExecutor; publisher = undefined; timing = undefined;
+  setSystemTime(); // Back to the real clock.
   await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true })));
 });
 
@@ -56,7 +57,7 @@ const noExecutor: ExecutorSource = async () => {
   return { launch: fail, observe: fail, download: fail, cancel: fail, recover: fail };
 };
 /** What the next `cli` calls use in place of the real adapters. Reset after each test. */
-let executors: ExecutorSource = noExecutor, publisher: Publisher | undefined;
+let executors: ExecutorSource = noExecutor, publisher: Publisher | undefined, timing: Pick<WatchOptions, "sleep" | "retry"> | undefined;
 /** Run the CLI in-process and capture what it prints and whether it failed. */
 async function cli(...args: string[]): Promise<{ out: string; err: string; code: number }> {
   const stdout = process.stdout.write, stderr = process.stderr.write, previous = process.exitCode;
@@ -64,7 +65,7 @@ async function cli(...args: string[]): Promise<{ out: string; err: string; code:
   process.exitCode = 0;
   process.stdout.write = ((chunk: string | Uint8Array) => { out += chunk.toString(); return true; }) as typeof process.stdout.write;
   process.stderr.write = ((chunk: string | Uint8Array) => { err += chunk.toString(); return true; }) as typeof process.stderr.write;
-  try { await main(args, executors, publisher); return { out, err, code: Number(process.exitCode ?? 0) }; }
+  try { await main(args, executors, publisher, timing); return { out, err, code: Number(process.exitCode ?? 0) }; }
   finally { process.stdout.write = stdout; process.stderr.write = stderr; process.exitCode = previous ?? 0; }
 }
 
@@ -183,6 +184,252 @@ test("a run that failed before it started shows its cause and does not fail wait
   expect(JSON.parse((await cli("collect", id, "--force", "--home", home, "--json")).out)).toMatchObject({ collection: "collected", package_path: null, report_path: null });
 });
 
+const second = "20261103-130000-11223344", third = "20261103-140000-55667788";
+const repository = "https://github.com/example/source", otherRepository = "https://github.com/example/other";
+/** Two local records of runs that are still running, the second for another repository. */
+async function runningRuns(home: string): Promise<void> {
+  const running = { state: "running", status: "pending", end: null, exit_code: null, finished_at: null, label: "nightly", collection: { state: "pending", path: null, report: null } } as const;
+  await writeRun(home, { ...finished(home), ...running, id: second, created_at: "2026-11-03T13:00:00Z" });
+  await writeRun(home, { ...finished(home), ...running, id: third, created_at: "2026-11-03T14:00:00Z", source: { repository: otherRepository, commit: "c".repeat(40) } });
+}
+/** An executor on which every run has ended. A run has a report, except the IDs in `empty`. `observed` runs at each status call. */
+function endedRuns(empty: string[] = [], observed: (record: RunRecord) => void = () => {}): ExecutorSource {
+  return async () => ({
+    ...await noExecutor("docker"),
+    observe: async record => { observed(record); return { code: 0, complete: { ...record, state: "finished", status: "succeeded", end: "completed", exit_code: 0, finished_at: "2026-11-03T15:00:00Z" } }; },
+    download: async (record, destination) => {
+      await mkdir(join(destination, "raw"), { recursive: true });
+      await writeFile(join(destination, "prompt.txt"), "Audit this source.");
+      await writeFile(join(destination, "raw/transcript.jsonl"), '{"text":"work"}\n');
+      if (!empty.includes(record.id)) await writeFile(join(destination, "raw/report.md"), "# Report\n");
+      return [];
+    },
+  });
+}
+
+test("watch prints one line for each change and a summary with the report of each run", async () => {
+  const home = await workspace();
+  await settledRun(home);
+  await runningRuns(home);
+  executors = endedRuns([third]);
+  const report = join(home, "runs", second, "artifacts/raw/report.md"), evidence = join(home, "runs", third, "artifacts");
+  const summary = [
+    "Summary. Runs: 2. With a report: 1. Settled: 2. Watch failures: 0. Not settled: 0.",
+    `${second}  nightly  ${repository}  succeeded (completed)  ${report}`,
+    `${third}  nightly  ${otherRepository}  failed (completed)  no report`,
+    "",
+  ];
+  // The run that was settled before is not watched. The run without a report is a result, not a failure.
+  expect(await cli("watch", "--home", home)).toEqual({ code: 0, err: "", out: [
+    `${second}  nightly  ${repository}  ended (completed)`,
+    `${second}  nightly  ${repository}  collected: ${report}`,
+    `${third}  nightly  ${otherRepository}  ended (completed)`,
+    `${third}  nightly  ${otherRepository}  collected, no report. Evidence: ${evidence}`,
+    ...summary,
+  ].join("\n") });
+  expect(await readFile(report, "utf8")).toBe("# Report\n");
+  // Now every run is settled. A label and IDs still give the summary of their runs.
+  expect(await cli("watch", "--home", home)).toEqual({ code: 0, err: "", out: "No runs to watch.\n" });
+  expect(await cli("watch", "--label", "nightly", "--home", home)).toEqual({ code: 0, err: "", out: summary.join("\n") });
+  expect((await cli("watch", third, id, "--home", home)).out).toBe([
+    "Summary. Runs: 2. With a report: 1. Settled: 2. Watch failures: 0. Not settled: 0.",
+    `${third}  nightly  ${otherRepository}  failed (completed)  no report`,
+    `${id}  baseline  ${repository}  succeeded (completed)  ${join(home, "runs", id, "artifacts/raw/report.md")}`,
+    "",
+  ].join("\n"));
+
+  // With --json: JSON lines only, each with the schema and a type.
+  await runningRuns(home);
+  const json = await cli("watch", "--json", "--home", home);
+  expect([json.code, json.err]).toEqual([0, ""]);
+  const lines = json.out.trimEnd().split("\n").map(line => JSON.parse(line));
+  expect(lines.map(line => [line.schema, line.type, line.id])).toEqual([
+    ["ultrafuzz.watch.v2", "ended", second], ["ultrafuzz.watch.v2", "collected", second],
+    ["ultrafuzz.watch.v2", "ended", third], ["ultrafuzz.watch.v2", "collected", third],
+    ["ultrafuzz.watch.v2", "summary", undefined],
+  ]);
+  // Each line has its time: the text lines have none.
+  expect(lines.every(line => Math.abs(Date.parse(line.at) - Date.now()) < 60_000)).toBe(true);
+  expect(lines[1]).toEqual({ schema: "ultrafuzz.watch.v2", type: "collected", at: lines[1].at, id: second, state: "finished", status: "succeeded", end: "completed", executor: "docker",
+    collection: "collected", publication: "disabled", package_path: join(home, "runs", second, "artifacts"), report_path: report, pr_url: null, label: "nightly", repository });
+  expect(lines[4]).toMatchObject({ total: 2, reports: 1, settled: 2, failed: 0, not_settled: 0, unknown: [], runs: [
+    { id: second, label: "nightly", repository, status: "succeeded", collection: "collected", report_path: report, settled: true, gave_up: false },
+    { id: third, label: "nightly", repository: otherRepository, status: "failed", collection: "collected", package_path: evidence, report_path: null, settled: true, gave_up: false },
+  ] });
+  expect(JSON.parse((await cli("watch", "--json", "--home", home)).out)).toEqual({ schema: "ultrafuzz.watch.v2", type: "summary", at: expect.any(String), total: 0, reports: 0, settled: 0, failed: 0, not_settled: 0, runs: [], unknown: [] });
+});
+
+test("watch fails for a failed collection, a failed publication and an unknown ID, and not for a run that is still active", async () => {
+  const home = await workspace();
+  await runningRuns(home);
+  // The runs ended, and their store cannot be read. --once does one cycle.
+  executors = async () => ({ ...await endedRuns()("docker"), download: (await noExecutor("docker")).download });
+  const failed = await cli("watch", "--once", "--home", home);
+  expect(failed).toEqual({ code: 1, err: "", out: [
+    `${second}  nightly  ${repository}  ended (completed)`,
+    `${second}  nightly  ${repository}  collection failed (attempt 1 of 5): Simulated store failure`,
+    `${third}  nightly  ${otherRepository}  ended (completed)`,
+    `${third}  nightly  ${otherRepository}  collection failed (attempt 1 of 5): Simulated store failure`,
+    "Summary. Runs: 2. With a report: 0. Settled: 0. Watch failures: 2. Not settled: 0.",
+    `${second}  nightly  ${repository}  succeeded (completed)  collection failed  no report`,
+    `${third}  nightly  ${otherRepository}  succeeded (completed)  collection failed  no report`,
+    "",
+  ].join("\n") });
+  const again = await cli("watch", second, "--once", "--json", "--home", home);
+  expect(again.code).toBe(1);
+  const lines = again.out.trimEnd().split("\n").map(line => JSON.parse(line));
+  expect(lines.every(line => line.schema === "ultrafuzz.watch.v2")).toBe(true);
+  expect(lines).toMatchObject([
+    { type: "collection_failed", id: second, collection: "failed", attempt: 1, attempts: 5, error: "Simulated store failure", report_path: null },
+    { type: "summary", total: 1, reports: 0, settled: 0, failed: 1, not_settled: 0, runs: [{ id: second, settled: false, gave_up: false }] },
+  ]);
+
+  // A requested publication that fails. The local report is still in the summary.
+  const publication = { state: "pending" as const, repository: "owner/results", branch: `ultrafuzz/${id}`, path: `attempts/baseline/runs/${id}`, pr_url: null };
+  const record = await settledRun(home, { publication });
+  publisher = async () => { throw new Error("Simulated publication failure"); };
+  const unpublished = await cli("watch", id, "--once", "--home", home);
+  expect(unpublished).toEqual({ code: 1, err: "", out: [
+    `${id}  baseline  ${repository}  publication failed (attempt 1 of 5): Simulated publication failure`,
+    "Summary. Runs: 1. With a report: 1. Settled: 0. Watch failures: 1. Not settled: 0.",
+    `${id}  baseline  ${repository}  succeeded (completed)  publication failed  ${record.collection.report}`,
+    "",
+  ].join("\n") });
+  expect((await cli("watch", id, "--once", "--json", "--home", home)).out.trimEnd().split("\n").map(line => JSON.parse(line))).toMatchObject([
+    { type: "publication_failed", id, collection: "collected", publication: "failed", attempt: 1, attempts: 5, error: "Simulated publication failure", report_path: record.collection.report },
+    { type: "summary", reports: 1, settled: 0, failed: 1 },
+  ]);
+  publisher = async () => ({ pr_url: "https://github.com/owner/results/pull/7" });
+  expect(await cli("watch", id, "--home", home)).toEqual({ code: 0, err: "", out: [
+    `${id}  baseline  ${repository}  published: https://github.com/owner/results/pull/7`,
+    "Summary. Runs: 1. With a report: 1. Settled: 1. Watch failures: 0. Not settled: 0.",
+    `${id}  baseline  ${repository}  succeeded (completed)  ${record.collection.report}  https://github.com/owner/results/pull/7`,
+    "",
+  ].join("\n") });
+
+  // An unknown ID fails the command. The known run is still in the summary.
+  const unknown = "20200101-000000-00000000";
+  const missing = await cli("watch", unknown, id, unknown, "--home", home); // An ID that is given twice is one run.
+  expect(missing).toEqual({ code: 1, err: `Run ${unknown}: this workspace has no such run.\n`, out: [
+    "Summary. Runs: 2. With a report: 1. Settled: 1. Watch failures: 1. Not settled: 0.",
+    `${unknown}  unknown run`,
+    `${id}  baseline  ${repository}  succeeded (completed)  ${record.collection.report}  https://github.com/owner/results/pull/7`,
+    "",
+  ].join("\n") });
+  const missingJson = await cli("watch", unknown, "--json", "--home", home);
+  expect([missingJson.code, JSON.parse(missingJson.out)]).toEqual([1, { schema: "ultrafuzz.watch.v2", type: "summary", at: expect.any(String), total: 1, reports: 0, settled: 0, failed: 1, not_settled: 0, runs: [], unknown: [unknown] }]);
+
+  // A run that is still active after --once is not a failure. Its status call that fails is a diagnostic on stderr.
+  await runningRuns(home);
+  executors = async () => ({ ...await noExecutor("docker"), observe: async record => { if (record.id === third) throw new Error("connection lost"); return { code: null, complete: null }; } });
+  expect(await cli("watch", "--once", "--home", home)).toEqual({ code: 0, err: `Run ${third}: the status check failed (connection lost). The watch tries again at each cycle.\n`, out: [
+    "Summary. Runs: 2. With a report: 0. Settled: 0. Watch failures: 0. Not settled: 2.",
+    `${second}  nightly  ${repository}  running  no report`,
+    `${third}  nightly  ${otherRepository}  running  no report`,
+    "",
+  ].join("\n") });
+});
+
+test("watch checks its arguments, and its options do not apply to other commands", async () => {
+  const home = await workspace();
+  await runningRuns(home);
+  executors = endedRuns([], () => { throw new Error("No run may be refreshed"); });
+  for (const [args, error] of [
+    [["watch", "not-an-id"], "Invalid run ID: not-an-id"],
+    [["watch", second, "--label", "nightly"], "watch takes run IDs or --label, not both."],
+    [["watch", "--interval", "4"], "--interval must be between 5 and 86400 seconds."],
+    [["watch", "--interval", "86401"], "--interval must be between 5 and 86400 seconds."],
+    [["watch", "--interval", "soon"], "--interval must be a positive integer."],
+    [["watch", "--force"], "--force does not apply to watch."],
+    [["status", second, "--once"], "--once does not apply to status."],
+    [["list", "--interval", "60"], "--interval does not apply to list."],
+    [["status", second, third], "Unexpected positional arguments."],
+  ] as const) expect(await cli(...args, "--home", home)).toEqual({ code: 1, out: "", err: `Error: ${error}\n` });
+  expect(JSON.parse((await cli("watch", "--interval", "4", "--json", "--home", home)).out)).toEqual({ schema: "ultrafuzz.error.v2", error: "--interval must be between 5 and 86400 seconds." });
+});
+
+test("SIGINT and SIGTERM stop watch after the run that is being refreshed, with the summary", async () => {
+  const home = await workspace();
+  const report = join(home, "runs", second, "artifacts/raw/report.md");
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    await runningRuns(home);
+    const listeners = process.listenerCount(signal);
+    let during = 0;
+    // The signal arrives while the first run is refreshed, and again at once, as `timeout` sends it. The watch still
+    // handles the signal then, so the second one does not end the process. The collection is completed.
+    executors = endedRuns([], () => { process.emit(signal, signal); during = process.listenerCount(signal); process.emit(signal, signal); });
+    // A run is not settled, so the exit code is the code of the signal.
+    expect(await cli("watch", "--interval", "3600", "--home", home)).toEqual({ code: signal === "SIGINT" ? 130 : 143, err: "", out: [
+      `${second}  nightly  ${repository}  ended (completed)`,
+      `${second}  nightly  ${repository}  collected: ${report}`,
+      "Summary. Runs: 2. With a report: 1. Settled: 1. Watch failures: 0. Not settled: 1.",
+      `${second}  nightly  ${repository}  succeeded (completed)  ${report}`,
+      `${third}  nightly  ${otherRepository}  running  no report`,
+      "",
+    ].join("\n") });
+    expect([during, process.listenerCount(signal)]).toEqual([listeners + 1, listeners]);
+    // A signal during the work on the last run: each run is settled, and the exit code is 0.
+    executors = endedRuns([], () => { process.emit(signal, signal); });
+    expect((await cli("watch", third, "--home", home)).code).toBe(0);
+  }
+});
+
+test("watch pauses for the interval and shows a run that it gave up", async () => {
+  const home = await workspace();
+  await runningRuns(home);
+  // The store of the ended run cannot be read. Each attempt is made in the next cycle here.
+  executors = async () => ({ ...await endedRuns()("docker"), download: (await noExecutor("docker")).download });
+  const pauses: number[] = [];
+  timing = { retry: 0, sleep: async ms => { pauses.push(ms); } };
+  const row = `${second}  nightly  ${repository}`;
+  expect(await cli("watch", second, "--home", home)).toEqual({ code: 1, err: "Runs watched: 1. Not settled: 1. A cycle starts every 60 seconds.\n", out: [
+    `${row}  ended (completed)`,
+    ...[1, 2, 3, 4, 5].map(attempt => `${row}  collection failed (attempt ${attempt} of 5): Simulated store failure`),
+    `${row}  gave up after 5 failed attempts; use collect to try again`,
+    "Summary. Runs: 1. With a report: 0. Settled: 0. Watch failures: 1. Not settled: 0.",
+    `${row}  succeeded (completed)  collection failed  no report`,
+    "",
+  ].join("\n") });
+  // The default interval is 60 seconds, and the option is in seconds.
+  expect(pauses.splice(0)).toEqual(Array(4).fill(60_000));
+  const json = (await cli("watch", second, "--interval", "3600", "--json", "--home", home)).out.trimEnd().split("\n").map(line => JSON.parse(line));
+  expect(pauses.splice(0)).toEqual(Array(4).fill(3_600_000));
+  expect(json.slice(5)).toMatchObject([
+    { type: "gave_up", id: second, attempt: 5, attempts: 5, error: "Simulated store failure" },
+    { type: "summary", total: 1, settled: 0, failed: 1, not_settled: 0, runs: [{ id: second, settled: false, gave_up: true }] },
+  ]);
+
+  // Status checks that fail for too long: each pause is three hours long here.
+  executors = async () => ({ ...await noExecutor("docker"), observe: async () => { throw new Error("connection lost"); } });
+  timing = { sleep: async () => { setSystemTime(new Date(Date.now() + 3 * 3_600_000)); } };
+  const stuck = await cli("watch", third, "--home", home);
+  expect([stuck.code, stuck.out]).toEqual([1, [
+    `${third}  nightly  ${otherRepository}  gave up, the status check failed for too long: connection lost`,
+    "Summary. Runs: 1. With a report: 0. Settled: 0. Watch failures: 1. Not settled: 0.",
+    `${third}  nightly  ${otherRepository}  running  status check failed  no report`,
+    "",
+  ].join("\n")]);
+  expect(JSON.parse((await cli("watch", third, "--json", "--home", home)).out.trimEnd().split("\n")[0]!)).toMatchObject({ type: "gave_up", id: third, state: "running", error: "connection lost" });
+});
+
+test("watch names a run that started and a run that never started", async () => {
+  const home = await workspace();
+  await runningRuns(home);
+  // The first run is still in its launch. The launch of the second one was killed, and the run was cancelled.
+  await writeRun(home, { ...finished(home), id: second, label: "nightly", state: "launching", status: "pending", end: null, exit_code: null, finished_at: null, collection: { state: "pending", path: null, report: null } });
+  await writeRun(home, { ...finished(home), id: third, label: "nightly", state: "prepared", status: "pending", end: "cancelled", exit_code: null, started_at: null, finished_at: null, collection: { state: "pending", path: null, report: null } });
+  executors = async () => ({ ...await noExecutor("docker"), observe: async () => ({ code: null, complete: null }) });
+  expect(await cli("watch", "--once", "--home", home)).toEqual({ code: 0, err: "", out: [
+    `${second}  nightly  ${repository}  started`,
+    `${third}  nightly  ${repository}  ended (cancelled)`,
+    `${third}  nightly  ${repository}  did not start, nothing to collect`,
+    "Summary. Runs: 2. With a report: 0. Settled: 1. Watch failures: 0. Not settled: 1.",
+    `${second}  nightly  ${repository}  running  no report`,
+    `${third}  nightly  ${repository}  failed (cancelled)  no report`,
+    "",
+  ].join("\n") });
+});
+
 test("launch flags select the executor and publication, and are checked before launch", async () => {
   const home = await workspace();
   process.env.ULTRAFUZZ_CLI_TEST_KEY = "not-a-real-key";
@@ -210,7 +457,7 @@ test("the version is an experimental semver that matches package.json, and the R
   expect(help).toContain(`ultrafuzz ${version}`);
   expect(help).toContain("Experimental release");
   const commands = [...help.matchAll(/^  ([a-z]+) /gm)].map(match => match[1]!);
-  expect(commands).toEqual(["init", "launch", "list", "status", "wait", "collect", "cancel", "recover", "profiles", "viewer"]);
+  expect(commands).toEqual(["init", "launch", "list", "status", "wait", "watch", "collect", "cancel", "recover", "profiles", "viewer"]);
   for (const command of commands) expect(readme).toContain(`| \`${command}`);
   const flags = new Set(help.match(/--[a-z][a-z-]*/g));
   expect(flags.size).toBeGreaterThan(15);

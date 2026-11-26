@@ -84,6 +84,8 @@ export interface RunRecord {
   started_at: string | null;
   finished_at: string | null;
   last_observed_at: string | null;
+  /** Host-owned. Since when the platform has not known a run that the host holds as running. Absent or null when it knows the run. */
+  unknown_since?: string | null;
   session_id: string | null;
   continuation: Continuation | null;
   inputs: InputRecord[];
