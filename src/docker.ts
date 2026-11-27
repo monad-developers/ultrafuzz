@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, openSync } from "node:fs";
+import { closeSync, openSync, writeSync } from "node:fs";
 import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { c as createTar, x as extractTar, type ReadEntry } from "tar";
-import { RUN_ROOT, WORKER_COMMAND, stageRuntime, startingJob, storedRecord, type Executor, type Observation } from "./executor";
+import { LaunchNotStarted, RUN_ROOT, WORKER_COMMAND, stageRuntime, startingJob, storedRecord, type Executor, type Observation } from "./executor";
 import type { Config, ExecutorRecord, ExecutorResources, RunRecord } from "./types";
 
 const ROOT = resolve(import.meta.dir, "..");
@@ -28,8 +28,12 @@ const NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 const ALIVE = new Set(["running", "paused", "restarting"]);
 /** What `docker cp` says when the source path does not exist. The wording changed between Docker versions. */
 const ABSENT = /no such container:path|could not find the file|no such file or directory/i;
+/** A reader refuses a larger record file. The worker keeps its own far below this size. */
+const RECORD_LIMIT = 16 * 1024 * 1024;
+/** A stored record that is too large or not a run record. A new read gives the same result. */
+const damaged = (error: unknown): error is Error => error instanceof SyntaxError || (error instanceof Error && error.message.startsWith("Invalid "));
 
-export interface DockerResult { code: number; stdout: string; stderr: string }
+export interface DockerResult { code: number; stdout: string; stderr: string; /** True when the command was stopped at the `limit` of its output file. */ overflow?: boolean }
 export interface DockerOptions {
   /** Extra variables for the docker client only. The model key travels this way, never as an argument. */
   env?: Record<string, string>;
@@ -37,6 +41,8 @@ export interface DockerOptions {
   input?: string;
   /** Write stdout to this file instead of keeping it in memory. */
   output?: string;
+  /** With `output`: the most bytes to write. A command that prints more is stopped, and its result has `overflow`. */
+  limit?: number;
   /** Show the command's output on stderr. Used for long image builds and pulls. */
   show?: boolean;
   /** Start the client and return at once. The client keeps running after this process exits. */
@@ -55,24 +61,34 @@ export function commandRunner(binary = "docker"): DockerRunner {
       files.push(openSync(path, flags, 0o600));
       return files.at(-1)!;
     };
-    let child;
+    // With a limit, this process writes the output file itself and counts the bytes.
+    const limit = options.output !== undefined && !options.detached && !options.show ? options.limit : undefined;
+    let child, bounded: number | null = null;
+    const release = () => { if (bounded !== null) closeSync(bounded); bounded = null; };
     try {
-      const input = open(options.input, "r"), output = open(options.output, "w");
+      const input = open(options.input, "r"), output = limit === undefined ? open(options.output, "w") : null;
+      if (limit !== undefined) bounded = openSync(options.output!, "w", 0o600);
       child = spawn(binary, args, {
         env: { ...process.env, ...options.env }, detached: !!options.detached,
         stdio: options.detached ? "ignore" : [input ?? "ignore", options.show ? 2 : output ?? "pipe", options.show ? 2 : "pipe"],
       });
-    } catch (error) { reject(error); return; }
+    } catch (error) { release(); reject(error); return; }
     finally { for (const file of files) closeSync(file); } // The child holds its own copies.
-    child.once("error", reject);
+    child.once("error", error => { release(); reject(error); });
     if (options.detached) {
       child.once("spawn", () => { child.unref(); resolvePromise({ code: 0, stdout: "", stderr: "" }); });
       return;
     }
-    let stdout = "", stderr = "";
-    child.stdout?.on("data", chunk => { stdout = tail(stdout + chunk, 4 * 1024 * 1024); });
+    let stdout = "", stderr = "", written = 0, overflow = false;
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (limit === undefined) { stdout = tail(stdout + chunk, 4 * 1024 * 1024); return; }
+      if (overflow) return;
+      if (written + chunk.length > limit) { overflow = true; child.kill("SIGKILL"); return; }
+      try { writeSync(bounded!, chunk); written += chunk.length; }
+      catch (error) { overflow = true; stderr = String(error); child.kill("SIGKILL"); }
+    });
     child.stderr?.on("data", chunk => { stderr = tail(stderr + chunk, 64 * 1024); });
-    child.once("close", code => resolvePromise({ code: code ?? 1, stdout, stderr }));
+    child.once("close", code => { release(); resolvePromise({ code: overflow ? 1 : code ?? 1, stdout, stderr, ...(overflow ? { overflow } : {}) }); });
   });
 }
 
@@ -273,14 +289,16 @@ export class DockerExecutor implements Executor {
     const scratch = await mkdtemp(join(tmpdir(), "ultrafuzz-record-"));
     try {
       const archive = join(scratch, "record.tar"), files = join(scratch, "files");
-      const copied = await this.run(["cp", `${container}:${RUN_ROOT}/${name}`, "-"], { output: archive });
+      // The read is bounded: the archive of a record is a little larger than the record. A larger file is not read to its end.
+      const copied = await this.run(["cp", `${container}:${RUN_ROOT}/${name}`, "-"], { output: archive, limit: RECORD_LIMIT + 1024 * 1024 });
+      if (copied.overflow) throw new Error("Invalid stored run record");
       if (copied.code !== 0) {
         if (ABSENT.test(copied.stderr)) return null;
         throw failure(["cp"], copied);
       }
       const omitted = await unpack(archive, files, name, 0);
       const info = await lstat(join(files, name)).catch(() => null);
-      if (omitted.length || !info?.isFile() || info.size > 16 * 1024 * 1024) throw new Error("Invalid stored run record");
+      if (omitted.length || !info?.isFile() || info.size > RECORD_LIMIT) throw new Error("Invalid stored run record");
       return storedRecord(await readFile(join(files, name), "utf8"));
     } finally { await rm(scratch, { recursive: true, force: true }); }
   }
@@ -301,15 +319,19 @@ export class DockerExecutor implements Executor {
     } finally { await rm(archive, { force: true }); }
   }
 
-  /** Remove what a failed launch left. A container that ran is evidence, so then nothing is removed. */
-  private async discard(docker: DockerRecord, id: string): Promise<void> {
+  /**
+   * Remove what a failed launch left. A container that ran is evidence, so then nothing is removed.
+   * The result is true only when Docker confirmed that neither the container nor the volume is left.
+   */
+  private async discard(docker: DockerRecord, id: string): Promise<boolean> {
     try {
       const container = await this.inspect(docker.container_name, id);
-      if (container && container.status !== "created") return;
+      if (container && container.status !== "created") return false;
       // A container that never started has no evidence, but its configuration holds the key.
       if (container) await this.must(["rm", docker.container_name]);
-      await this.must(["volume", "rm", docker.volume_name]);
-    } catch { /* The launch error is the one to report. */ }
+      const removed = await this.run(["volume", "rm", docker.volume_name]);
+      return removed.code === 0 || /no such volume/i.test(removed.stderr);
+    } catch { return false; /* The launch error is the one to report. */ }
   }
 
   /** Host checks and the image, before the core commits to a launch. It creates nothing for the run. */
@@ -322,13 +344,16 @@ export class DockerExecutor implements Executor {
   async launch(record: RunRecord, staging: string, key: string): Promise<string> {
     const docker = handles(record);
     staging = resolve(staging);
-    await this.host(docker);
-    const image = await this.image(docker.image);
-    await stageRuntime(staging, this.root);
-    await checkStaging(staging);
-    await this.must(["volume", "create", "--label", `${RUN_LABEL}=${record.id}`, "--label", `${SCHEMA_LABEL}=${SCHEMA}`, docker.volume_name]);
+    let image: string;
+    try {
+      await this.host(docker);
+      image = await this.image(docker.image);
+      await stageRuntime(staging, this.root);
+      await checkStaging(staging);
+    } catch (error) { throw new LaunchNotStarted(error); } // Nothing was created for the run.
     const start = await mkdtemp(join(tmpdir(), "ultrafuzz-start-"));
     try {
+      await this.must(["volume", "create", "--label", `${RUN_LABEL}=${record.id}`, "--label", `${SCHEMA_LABEL}=${SCHEMA}`, docker.volume_name]);
       const created = (await this.must(createArguments(record.id, docker, image), { env: { OPENROUTER_API_KEY: key } })).split(/\s+/).pop() ?? "";
       // The container is not started yet: its store is filled first, so the worker never sees a partial store.
       // The archive can be large, so it is written next to the staging directory, not to the system temporary directory.
@@ -340,7 +365,8 @@ export class DockerExecutor implements Executor {
       await this.must(["start", docker.container_name]);
       return /^[a-f0-9]{12,64}$/.test(created) ? created : docker.container_name;
     } catch (error) {
-      await this.discard(docker, record.id);
+      // Without that confirmation the container can have run, so the core keeps the run for `status` to reconcile.
+      if (await this.discard(docker, record.id)) throw new LaunchNotStarted(error);
       throw error;
     } finally { await rm(start, { recursive: true, force: true }); }
   }
@@ -351,8 +377,14 @@ export class DockerExecutor implements Executor {
     // A container that was created but never started has run nothing: Docker knows no runtime for the run.
     const code = !container || container.status === "created" ? undefined : ALIVE.has(container.status) ? null : container.exit;
     let complete: RunRecord | null = null;
-    if (container) complete = await this.stored(docker.container_name, "complete.json");
-    else if (await this.volume(docker.volume_name, record.id)) complete = await this.reader(docker.volume_name, record.id, docker.image, name => this.stored(name, "complete.json"));
+    try {
+      if (container) complete = await this.stored(docker.container_name, "complete.json");
+      else if (await this.volume(docker.volume_name, record.id)) complete = await this.reader(docker.volume_name, record.id, docker.image, name => this.stored(name, "complete.json"));
+    } catch (error) {
+      // As on Modal: the run then ends as a run without a record, so the core can still collect its outputs. Every other error stays an error.
+      if (!damaged(error)) throw error;
+      process.stderr.write(`The completion record of run ${record.id} cannot be used (${error.message}). The run is handled as a run without one.\n`);
+    }
     if (complete && complete.id !== record.id) throw new Error("Completion record belongs to another run");
     return { code, runtime_id: container?.id, complete };
   }
@@ -364,15 +396,18 @@ export class DockerExecutor implements Executor {
     return this.reader(docker.volume_name, record.id, docker.image, name => this.outputs(name, destination));
   }
 
-  async cancel(record: RunRecord): Promise<void> {
+  async cancel(record: RunRecord): Promise<boolean> {
     const docker = handles(record);
     const container = await this.inspect(docker.container_name, record.id);
-    if (!container || !ALIVE.has(container.status)) return;
+    if (!container) return false;
+    // A container that has ended, or that never started, has nothing to stop.
+    if (!ALIVE.has(container.status)) return true;
     // The worker also polls this marker, so a stop request reaches it even if the signal is lost. Its failure is not fatal.
     await this.run(["exec", docker.container_name, "touch", `${RUN_ROOT}/cancelled`]);
     // The Docker daemon sends SIGTERM now and SIGKILL after the grace period. It does so even when this
     // client and the CLI have exited, so the client is not awaited. The volume is kept.
     await this.run(["stop", "-t", String(GRACE_SECONDS), docker.container_name], { detached: true });
+    return true;
   }
 
   async recover(settings: Config, id?: string): Promise<RunRecord[]> {
@@ -388,7 +423,7 @@ export class DockerExecutor implements Executor {
       try { record = await this.reader(volume, run, config.image, async name => await this.stored(name, "complete.json") ?? await this.stored(name, "run.json")); }
       catch (error) {
         // One unreadable store must not hide the others. A named run still fails loudly.
-        if (id || !(error instanceof SyntaxError || (error instanceof Error && error.message.startsWith("Invalid ")))) throw error;
+        if (id || !damaged(error)) throw error;
         process.stderr.write(`Skipped Docker volume ${volume}: ${error.message}\n`);
         continue;
       }

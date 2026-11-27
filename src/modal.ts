@@ -5,7 +5,7 @@ import { chmod, mkdir, readFile, readdir, readlink, rm, stat } from "node:fs/pro
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ModalClient, NotFoundError, SandboxFilesystemFileTooLargeError, SandboxFilesystemNotFoundError, type App, type Image, type Sandbox, type Volume } from "modal";
 import { c as createTar, t as listTar, x as extractTar, type ReadEntry } from "tar";
-import { RUN_ROOT, WORKER_COMMAND, stageRuntime, startingJob, storedRecord, type Executor, type Observation } from "./executor";
+import { LaunchNotStarted, RUN_ROOT, WORKER_COMMAND, stageRuntime, startingJob, storedRecord, type Executor, type Observation } from "./executor";
 import type { Config, ExecutorRecord, ModalConfig, RunRecord } from "./types";
 
 const ROOT = resolve(import.meta.dir, "..");
@@ -41,6 +41,10 @@ const PART_SIZE = "4000M";
 const pack = (part: string) => `[ -d "$2" ] && [ ! -L "$2" ] || { mkdir -p "$1.empty" && set -- "$1" "$1.empty"; }; tar -cf "$1" --hard-dereference -C "$2" . && split -b ${part} -d -a 4 "$1" "$1." && rm -f "$1"`;
 /** The worker writes run.json every 10 seconds. A record in the store that is younger than this comes from a live worker. */
 const HEARTBEAT_SECONDS = 120;
+/** The longest wait for one look at a file in a running worker sandbox, in milliseconds. The SDK sets no limit of its own. */
+const LOOK_LIMIT = 30_000;
+/** A name that this machine does not write: it has a backslash or a control character. */
+const ODD_NAME = /[\\\x00-\x1f]/;
 /** The marker reaches a worker that misses the signal. The watchdog runs in the background, so the command returns at once. */
 const STOP = `touch ${RUN_ROOT}/cancelled; if [ -f ${RUN_ROOT}/worker.pid ]; then worker_pid=$(cat ${RUN_ROOT}/worker.pid); case "$worker_pid" in ''|*[!0-9]*) exit 1;; esac; (sleep ${GRACE_SECONDS}; kill -KILL "$worker_pid") </dev/null >/dev/null 2>&1 & kill -TERM "$worker_pid"; fi`;
 
@@ -131,12 +135,16 @@ async function unpack(archive: string, destination: string): Promise<RunRecord["
   // Strict: an entry that the tar library would skip with a warning, or an archive that is cut off, fails the whole read.
   await listTar({ file: archive, strict: true, onReadEntry: entry => {
     const parts = entry.path.split("/").filter(part => part && part !== ".");
-    if (entry.path.startsWith("/") || parts.includes("..") || /[\\\x00-\x1f]/.test(entry.path)) invalid = true;
+    if (entry.path.startsWith("/") || parts.includes("..")) invalid = true;
+    // Such a name cannot leave the destination, so it does not fail the collection. The name is recorded in an escaped form.
+    else if (ODD_NAME.test(entry.path)) omitted.push({ path: JSON.stringify(parts.join("/")).slice(1, -1), reason: "unsupported file name (backslash or control character); the original stays in the Modal Volume" });
     else if (!kind(entry)) omitted.push({ path: parts.join("/"), reason: "non-regular file excluded; the original stays in the Modal Volume" });
   } });
   if (invalid) throw new Error("Invalid remote artifact path");
   await extractTar({ file: archive, cwd: destination, strict: true, preserveOwner: false, filter: (_path, stats) => {
     const entry = stats as ReadEntry, mode = kind(entry);
+    // The same test on the same string as in the first read.
+    if (ODD_NAME.test(entry.path)) return false;
     if (mode) entry.mode = mode;
     return !!mode;
   } });
@@ -166,7 +174,8 @@ export class ModalExecutor implements Executor {
   /** When the store of a running sandbox was last looked at, by run ID. */
   private readonly looked = new Map<string, number>();
   /** `settle` is the pause in milliseconds between two looks for a completion record that is not visible yet, and between two tries of an image build. */
-  constructor(private readonly connect: () => ModalClient = sharedClient, private readonly root: string = ROOT, private readonly settle = 5000, private readonly part = PART_SIZE) {
+  /** `look` is the longest wait in milliseconds for one look at a file in a running worker sandbox. */
+  constructor(private readonly connect: () => ModalClient = sharedClient, private readonly root: string = ROOT, private readonly settle = 5000, private readonly part = PART_SIZE, private readonly look = LOOK_LIMIT) {
     if (!/^[1-9]\d*[KMG]?$/.test(part)) throw new Error("Invalid archive part size");
   }
 
@@ -245,13 +254,17 @@ export class ModalExecutor implements Executor {
       : this.modal.sandboxes.fromName(config.app, record.id, { environment: config.environment, includeTerminated: true });
   }
 
-  /** Remove the store that a failed launch left. A sandbox with the name of the run can still run, so then nothing is removed. */
-  private async discard(config: ModalRecord, id: string): Promise<void> {
+  /**
+   * Remove the store that a failed launch left. A sandbox with the name of the run can still run, so then nothing is removed.
+   * The result is true only when Modal said that no such sandbox exists and the removal of the store did not fail.
+   */
+  private async discard(config: ModalRecord, id: string): Promise<boolean> {
     try {
       (await this.modal.sandboxes.fromName(config.app, id, { environment: config.environment, includeTerminated: true })).detach();
+      return false;
     } catch (error) {
-      if (!(error instanceof NotFoundError)) return;
-      await this.modal.volumes.delete(config.volume_name, { environment: config.environment, allowMissing: true }).catch(() => undefined);
+      if (!(error instanceof NotFoundError)) return false;
+      return this.modal.volumes.delete(config.volume_name, { environment: config.environment, allowMissing: true }).then(() => true, () => false);
     }
   }
 
@@ -266,15 +279,19 @@ export class ModalExecutor implements Executor {
   }
 
   async launch(record: RunRecord, staging: string, key: string): Promise<string> {
-    const config = handles(record), client = this.modal;
+    const config = handles(record);
     staging = resolve(staging);
-    const app = await this.app(config);
-    const image = await this.image(config, app);
-    await stageRuntime(staging, this.root);
-    await checkStaging(staging);
-    const store = await client.volumes.fromName(config.volume_name, { environment: config.environment, createIfMissing: true, version: 2 });
+    let client: ModalClient, app: App, image: Image;
+    try {
+      client = this.modal;
+      app = await this.app(config);
+      image = await this.image(config, app);
+      await stageRuntime(staging, this.root);
+      await checkStaging(staging);
+    } catch (error) { throw new LaunchNotStarted(error); } // Nothing was created for the run.
     let requested = false;
     try {
+      const store = await client.volumes.fromName(config.volume_name, { environment: config.environment, createIfMissing: true, version: 2 });
       await this.helper(app, store, true, async sandbox => {
         await upload(sandbox, staging);
         // Modal ends the sandbox after 24 hours at most, so a run of that length gets a deadline that leaves the slack.
@@ -297,7 +314,8 @@ export class ModalExecutor implements Executor {
       return sandbox.sandboxId;
     } catch (error) {
       // After a transient error Modal can have accepted the worker sandbox, and a lookup by name can be too early to show it. The store is then kept.
-      if (!(requested && transient(error))) await this.discard(config, record.id);
+      // In every other case no worker sandbox was accepted. When the store is gone too, nothing of the run is left, and the core can end the run.
+      if (!(requested && transient(error)) && await this.discard(config, record.id)) throw new LaunchNotStarted(error);
       throw error;
     }
   }
@@ -319,7 +337,13 @@ export class ModalExecutor implements Executor {
       // it. The worker also ends itself after the grace period; this is the second guard.
       if (sandbox && code === null && due()) {
         const live = sandbox, age = async (name: string) => {
-          const info = await live.filesystem.stat(`${RUN_ROOT}/${name}`).catch(() => null);
+          // The SDK waits without a limit when the sandbox ends under this call, so the look has its own limit.
+          // A look that fails or takes too long counts as "no file": a sandbox is never stopped because of it.
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const info = await Promise.race([
+            live.filesystem.stat(`${RUN_ROOT}/${name}`).catch(() => null),
+            new Promise<null>(done => { timer = setTimeout(() => done(null), this.look); }),
+          ]).finally(() => clearTimeout(timer));
           return info ? Date.now() / 1000 - info.modifiedTime : 0;
         };
         recorded = await age("complete.json") > EXIT_SLACK_SECONDS;
@@ -339,8 +363,11 @@ export class ModalExecutor implements Executor {
               process.stderr.write(`The completion record of run ${record.id} cannot be used (${error.message}). The run is handled as a run without one.\n`);
               break;
             }
-            // A worker that exited with 0, or whose record was seen in its sandbox, has written the record. If the record is absent, the last commit of the Volume is not visible yet.
-            if (found || !(code === 0 || recorded) || attempt === 5) break;
+            // A worker that has ended can have written the record: Modal commits the Volume when the sandbox ends, and a new
+            // mount does not always show that commit at once. So the look is repeated a few times. This is a wait, not a
+            // proof: a worker that was killed wrote no record, and the look then ends without one. A launch without a
+            // sandbox, or a sandbox that Modal does not know, gets one look only.
+            if (found || code === undefined || attempt === 5) break;
             await Bun.sleep(this.settle);
             await reader.reloadVolumes().catch(() => undefined);
           }
@@ -391,14 +418,22 @@ export class ModalExecutor implements Executor {
     });
   }
 
-  async cancel(record: RunRecord): Promise<void> {
-    let sandbox: Sandbox;
-    try { sandbox = await this.find(record); if (await sandbox.poll() !== null) return; }
-    catch (error) { if (gone(error)) return; throw error; }
-    // The worker stops the harness and exports on SIGTERM. The sandbox and the Volume are kept.
-    try { await (await sandbox.exec(["sh", "-c", STOP], { stdout: "ignore", stderr: "ignore", timeoutMs: 60_000 })).wait(); }
-    catch (error) { if (await sandbox.poll().catch(() => null) === null) throw error; } // It ended before the signal: nothing is left to stop.
-    finally { sandbox.detach(); }
+  async cancel(record: RunRecord): Promise<boolean> {
+    const config = handles(record);
+    // As in observe: one "not found" for a runtime ID is not the last word, so the name of the run is asked as well.
+    for (const byName of config.runtime_id ? [false, true] : [true]) {
+      let sandbox: Sandbox | undefined;
+      try {
+        sandbox = await this.find(record, byName);
+        if (await sandbox.poll() !== null) { sandbox.detach(); return true; } // It has ended: nothing is left to stop.
+      } catch (error) { sandbox?.detach(); if (gone(error)) continue; throw error; }
+      // The worker stops the harness and exports on SIGTERM. The sandbox and the Volume are kept.
+      try { await (await sandbox.exec(["sh", "-c", STOP], { stdout: "ignore", stderr: "ignore", timeoutMs: 60_000 })).wait(); }
+      catch (error) { if (await sandbox.poll().catch(() => null) === null) throw error; } // It ended before the signal: nothing is left to stop.
+      finally { sandbox.detach(); }
+      return true;
+    }
+    return false;
   }
 
   async recover(settings: Config, id?: string): Promise<RunRecord[]> {

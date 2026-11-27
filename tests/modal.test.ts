@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { initWorkspace } from "../src/config";
 import { createEngine } from "../src/engine";
-import { WORKER_COMMAND } from "../src/executor";
+import { LaunchNotStarted, WORKER_COMMAND } from "../src/executor";
 import { readRun } from "../src/store";
 import type { Config, RunRecord, WorkerJob } from "../src/types";
 
@@ -547,6 +547,8 @@ describe("launch", () => {
     let failure: unknown;
     const printed = await notices(async () => { failure = await executor.launch(record(), staged(), key).catch(error => error); });
     expect((failure as Error).message).toBe("Could not persist run inputs (exit 1): sync: error syncing '/run-data': Input/output error");
+    // No worker sandbox was asked for and the store is removed, so the error says that nothing of the run is left.
+    expect(failure).toBeInstanceOf(LaunchNotStarted);
     expect(printed).toContain("Could not stop Modal helper sandbox sb-1; Modal ends it within 30 minutes. terminate failed");
     expect(modal.helpers()).toHaveLength(1);
     expect(modal.helpers()[0]!.terminated).toEqual([{ wait: true }]);
@@ -578,10 +580,29 @@ describe("launch", () => {
   test("a worker that Modal does not start leaves no helper and no store", async () => {
     const { modal, executor } = world();
     modal.createFailure = params => params.name ? new Error("Insufficient capacity to create sandbox.") : undefined;
-    await notices(async () => { await expect(executor.launch(record(), staged(), key)).rejects.toThrow("Insufficient capacity to create sandbox."); });
+    let failure: unknown;
+    await notices(async () => { failure = await executor.launch(record(), staged(), key).catch(error => error); });
+    expect((failure as Error).message).toBe("Insufficient capacity to create sandbox.");
+    expect(failure).toBeInstanceOf(LaunchNotStarted);
     expect(modal.helpers()[0]!.terminated).toEqual([{ wait: true }]);
     expect(modal.workers()).toEqual([]);
     expect(modal.deleted.map(item => item.name)).toEqual([id]);
+
+    // A store that Modal did not remove can still be there: the error stays a plain one, and the core keeps the run open.
+    const kept = world();
+    kept.modal.createFailure = params => params.name ? new Error("Insufficient capacity to create sandbox.") : undefined;
+    kept.modal.volumes.delete = async () => { throw new Error("delete failed"); };
+    await notices(async () => { failure = await kept.executor.launch(record(), staged(), key).catch(error => error); });
+    expect((failure as Error).message).toBe("Insufficient capacity to create sandbox.");
+    expect(failure).not.toBeInstanceOf(LaunchNotStarted);
+
+    // A failure before the store exists leaves nothing: a missing bundle, or an image that cannot be built.
+    const early = new FakeModal(), root = packageRoot();
+    rmSync(join(root, "dist/worker.js"));
+    failure = await new ModalExecutor(() => early.client, root, 0).launch(record({}, id, { image: "im-ready" }), staged(), key).catch(error => error);
+    expect((failure as Error).message).toContain("Worker bundle missing");
+    expect(failure).toBeInstanceOf(LaunchNotStarted);
+    expect([early.volumeRequests, early.boxes, early.deleted]).toEqual([[], [], []]);
   });
 
   test("the store is kept when a sandbox with the name of the run exists", async () => {
@@ -591,7 +612,11 @@ describe("launch", () => {
       modal.worker(id); // The request reached Modal, and only the answer was lost.
       return new Error("connection reset");
     };
-    await notices(async () => { await expect(executor.launch(record(), staged(), key)).rejects.toThrow("connection reset"); });
+    let failure: unknown;
+    await notices(async () => { failure = await executor.launch(record(), staged(), key).catch(error => error); });
+    expect((failure as Error).message).toBe("connection reset");
+    // The run can be alive, so this is not the error of a launch that left nothing.
+    expect(failure).not.toBeInstanceOf(LaunchNotStarted);
     expect(modal.deleted).toEqual([]);
     expect(modal.stores.has(id)).toBe(true);
 
@@ -607,7 +632,9 @@ describe("launch", () => {
     for (const code of [1, 2, 4, 13, 14]) {
       const accepted = world();
       accepted.modal.createFailure = params => params.name ? grpc(code, "the answer was lost") : undefined;
-      await notices(async () => { await expect(accepted.executor.launch(record(), staged(), key)).rejects.toThrow("the answer was lost"); });
+      await notices(async () => { failure = await accepted.executor.launch(record(), staged(), key).catch(error => error); });
+      expect((failure as Error).message).toContain("the answer was lost");
+      expect(failure).not.toBeInstanceOf(LaunchNotStarted);
       expect(accepted.modal.lookups).toEqual([]);
       expect(accepted.modal.deleted).toEqual([]);
       expect(listing(accepted.modal.stores.get(id)!)).toContain("job.json");
@@ -670,6 +697,16 @@ describe("observe", () => {
     // The store of a running sandbox is looked at once a minute at most, not at every observation.
     expect(box.stats).toEqual(["/run-data/complete.json"]);
     expect(box.execs).toEqual([]);
+
+    // A look that never ends, as when the sandbox ends under it, does not hold the observation. It counts as "no file".
+    const hanging = new FakeModal();
+    hanging.store(id, { "complete.json": finished() });
+    const hung = hanging.worker();
+    hung.box.filesystem.stat = () => new Promise(() => {});
+    const started = Date.now();
+    expect(await new ModalExecutor(() => hanging.client, packageRoot(), 0, "4000M", 50).observe({ ...hung.run, end: "cancelled" })).toEqual({ code: null, runtime_id: hung.box.sandboxId, complete: null });
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(hung.box.terminated).toEqual([]);
 
     // A worker that has just written its record gets the time to exit by itself.
     const ending = world();
@@ -743,13 +780,24 @@ describe("observe", () => {
     expectReader(never.modal.helpers()[0]!);
   });
 
-  test("a worker that was killed has no record, nothing waits for one, and its last output is printed", async () => {
+  test("a worker that ended with an error gets the same looks for a late commit; without a record its last output is printed", async () => {
+    // The platform stopped the worker after it wrote its record. The commit that holds the record shows at the second reload.
+    const late = world();
+    const store = late.modal.store(id, { "run.json": record() });
+    const stopped = late.modal.worker(id, 124);
+    writeFileSync(join(store, "complete.json"), JSON.stringify(finished()));
+    late.modal.onReload = count => { if (count === 2) late.modal.commit(id); };
+    expect(await notices(async () => { expect(await late.executor.observe(stopped.run)).toEqual({ code: 124, runtime_id: stopped.box.sandboxId, complete: finished() }); })).toBe("");
+    expect(late.modal.helpers()[0]!.reloads).toBe(2);
+    expect(stopped.box.tails).toEqual([]);
+
     const { modal, executor } = world();
     modal.store(id, { "run.json": record() });
     modal.output = ["cp: cannot stat '/run-data/runtime/.'", ": No such file or directory\n"];
     const { box, run } = modal.worker(id, 137);
     const printed = await notices(async () => { expect(await executor.observe(run)).toEqual({ code: 137, runtime_id: box.sandboxId, complete: null }); });
-    expect(modal.helpers()[0]!.reloads).toBe(0);
+    // A worker that was killed wrote no record. The looks end after five reloads.
+    expect(modal.helpers()[0]!.reloads).toBe(5);
     expect(box.tails).toEqual([{ entries: 40 }]);
     expect(printed).toBe(`Run ${id} ended with code 137 and without a completion record. The last output of its sandbox:\ncp: cannot stat '/run-data/runtime/.': No such file or directory\n`);
 
@@ -991,7 +1039,8 @@ describe("download", () => {
     const good = tarEntry("./raw/report.md", "0", "# Report\n");
     for (const entry of [
       tarEntry("../escape"), tarEntry("/etc/absolute"), tarEntry("./raw/../../escape"), tarEntry("raw/..", "5"), tarEntry("..", "5"),
-      tarEntry("line\nbreak"), tarEntry("back\\slash"), tarEntry("./raw/tab\tname"),
+      // A name that this machine does not write does not hide a path that leaves the destination.
+      tarEntry("./raw/back\\slash/../../../escape"),
     ]) {
       const { modal, executor } = world();
       modal.store(id, outputs);
@@ -1001,6 +1050,21 @@ describe("download", () => {
       expect(listing(root)).toEqual(["collected/"]);
       expectReader(modal.helpers()[0]!);
     }
+    // A name with a backslash or a control character cannot leave the destination. It is left out and recorded in an
+    // escaped form, and the other files are collected. Docker has no such rule: it writes the name as it is.
+    const odd = world();
+    odd.modal.store(id, outputs);
+    odd.modal.archive = Buffer.concat([good, tarEntry("line\nbreak", "0", "a"), tarEntry("./raw/workspace/my\\ notes.txt", "0", "b"), tarEntry("./raw/tab\tname", "0", "c"),
+      tarEntry("./raw/odd\\dir/", "5"), tarEntry("./raw/odd\\dir/inside.txt", "0", "d"), tarEntry("./raw/transcript\t.jsonl", "0", "{}"), tarEnd]);
+    const kept = scratch(), collected = join(kept, "collected");
+    const unsupported = "unsupported file name (backslash or control character); the original stays in the Modal Volume";
+    expect(byPath(await odd.executor.download(record({ state: "finished" }), collected))).toEqual([
+      { path: "line\\nbreak", reason: unsupported }, { path: "raw/odd\\\\dir", reason: unsupported }, { path: "raw/odd\\\\dir/inside.txt", reason: unsupported },
+      { path: "raw/tab\\tname", reason: unsupported }, { path: "raw/transcript\\t.jsonl", reason: unsupported }, { path: "raw/workspace/my\\\\ notes.txt", reason: unsupported },
+    ]);
+    expect(listing(kept)).toEqual(["collected/", "collected/raw/", "collected/raw/report.md"]);
+    expect(readFileSync(join(collected, "raw/report.md"), "utf8")).toBe("# Report\n");
+
     // A link in the archive is never created, so an entry below its name becomes a plain file in a plain directory.
     const { modal, executor } = world();
     modal.store(id, outputs);
@@ -1063,26 +1127,41 @@ describe("download", () => {
 });
 
 describe("cancel", () => {
-  test("nothing is done when Modal has no sandbox for the run, or when it has ended", async () => {
+  test("nothing is done when Modal has no sandbox for the run, or when it has ended, and the result says which", async () => {
     const absent = world();
-    await absent.executor.cancel(record());
-    await absent.executor.cancel(record({}, id, { runtime_id: "sb-forgotten" }));
-    expect(absent.modal.lookups).toHaveLength(1);
+    // Modal knows no sandbox: the result is false, and the core decides what that means.
+    expect(await absent.executor.cancel(record())).toBe(false);
+    // A runtime ID that Modal does not know is not the last word. The name of the run is asked as well, as in observe.
+    expect(await absent.executor.cancel(record({}, id, { runtime_id: "sb-forgotten" }))).toBe(false);
+    expect(absent.modal.lookups).toHaveLength(2);
     expect(absent.modal.boxes).toEqual([]);
 
     const { modal, executor } = world();
     modal.store(id);
     const { box, run } = modal.worker(id, 0);
-    await executor.cancel(run);
+    // A sandbox that has ended is known. Nothing is left to stop.
+    expect(await executor.cancel(run)).toBe(true);
     expect(box.execs).toEqual([]);
     expect(box.terminated).toEqual([]);
+    expect(box.detached).toBe(1);
+  });
+
+  test("a runtime ID that Modal does not know does not hide a worker that still runs under the name of the run", async () => {
+    const { modal, executor } = world();
+    modal.store(id);
+    const { box } = modal.worker();
+    expect(await executor.cancel(record({ state: "running" }, id, { runtime_id: "sb-forgotten" }))).toBe(true);
+    expect(modal.lookups).toEqual([{ app: "ultrafuzz", name: id, params: { environment: "main", includeTerminated: true } }]);
+    expect(box.execs).toHaveLength(1);
+    expect(box.execs[0]![2]).toContain("touch /run-data/cancelled");
+    expect(box.detached).toBe(1);
   });
 
   test("a running worker gets the marker and the signal; the sandbox and the store are kept", async () => {
     const { modal, executor } = world();
     modal.store(id);
     const { box, run } = modal.worker();
-    await executor.cancel(run);
+    expect(await executor.cancel(run)).toBe(true);
     expect(box.execs).toHaveLength(1);
     expect(box.execs[0]!.slice(0, 2)).toEqual(["sh", "-c"]);
     expect(box.execs[0]).toHaveLength(3);

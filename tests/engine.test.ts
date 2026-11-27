@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initWorkspace } from "../src/config";
 import { LOST_AFTER, WATCH_ATTEMPTS, createEngine, settled, type WatchOptions } from "../src/engine";
-import type { Executor, Observation } from "../src/executor";
+import { LaunchNotStarted, type Executor, type Observation } from "../src/executor";
 import { dockerInstructions } from "../src/modal";
 import { readRun, writeRun } from "../src/store";
 import type { Config, ExecutorName, RunRecord } from "../src/types";
@@ -62,7 +62,9 @@ class Cloud implements Executor {
     for (const [path, bytes] of Object.entries(this.outputs.get(record.id) ?? {})) await writeFile(join(destination, path), bytes);
     return [];
   }
-  async cancel(record: RunRecord) { this.cancelled.push(record.id); }
+  /** False models a platform that knows no runtime of the run, as with other credentials. */
+  known = true;
+  async cancel(record: RunRecord) { this.cancelled.push(record.id); return this.known; }
   async recover(_config: Config, id?: string) { return [...this.records.values()].filter(record => !id || record.id === id).map(record => structuredClone(record)); }
   finish(id: string, report?: string) {
     const record = this.records.get(id)!;
@@ -818,7 +820,13 @@ test("a runtime that exits or disappears without a completion record ends the ru
     setSystemTime(new Date(Date.parse(again.unknown_since!) + LOST_AFTER + 1000));
     gone = await engine.status(lost.id);
   } finally { process.stderr.write = write; setSystemTime(); }
-  expect(lines).toEqual(Array(2).fill(`Run ${lost.id}: the docker executor does not know this run. Check the credentials and the environment of this command. The run is recorded as lost if the answer stays the same for 30 minutes.\n`));
+  // One line for each row of "unknown" answers, with the time of the first one, and one line for the verdict.
+  const since = lines.map(line => line.match(/The first such answer was at (\S+); 30 minutes are left\.\n$/)?.[1]);
+  expect(lines).toEqual([
+    ...since.slice(0, 2).map(time => `Run ${lost.id}: the docker executor does not know this run. Check the credentials and the environment of this command. The run is recorded as lost if the answer stays the same for 30 minutes. The first such answer was at ${time}; 30 minutes are left.\n`),
+    `Run ${lost.id}: the docker executor has not known this run since ${gone.unknown_since}. The run is recorded as lost.\n`,
+  ]);
+  expect(since[1]).toBe(gone.unknown_since!);
   expect(gone).toMatchObject({ state: "finished", status: "failed", end: "lost", exit_code: null, collection: { state: "collected" } });
   expect(cloud.downloads).toBe(2);
 
@@ -914,6 +922,207 @@ test("a launch that fails before it reaches the executor is a settled run with n
   expect([cloud.launches, cloud.observations, cloud.downloads, attempts()]).toEqual([0, 0, 0, 0]);
 });
 
+/** Run `action` and return the lines that it wrote to stderr. */
+async function stderrLines(action: () => Promise<unknown>): Promise<string[]> {
+  const lines: string[] = [], write = process.stderr.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => { lines.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  try { await action(); } finally { process.stderr.write = write; }
+  return lines;
+}
+
+test("a launch that left nothing on the executor ends at once, and later commands and watches leave it alone", async () => {
+  const { home, cloud, engine, attempts } = await fixture();
+  // The executor removed what it created, as Docker does after a failed `docker start`. It says so with its error.
+  cloud.onLaunch = async () => { throw new LaunchNotStarted(new Error("docker start failed (exit 125): no such runtime")); };
+  const error = await engine.launch({ repository: "example", label: "refused", publish: true }).then(() => new Error("the launch did not fail"), failure => failure as Error);
+  expect(error.message).toContain("docker start failed (exit 125): no such runtime");
+  expect(error.message).not.toContain("reconcile");
+  const id = error.message.match(/Run (\S+):/)![1]!;
+  // 31 minutes later nothing has changed: the run is not ended as lost, and no collection is tried.
+  setSystemTime(new Date(Date.now() + 31 * 60_000));
+  for (const record of [await readRun(home, id), await engine.status(id), await engine.collect(id, true)]) {
+    expect(record).toMatchObject({ state: "finished", status: "failed", end: "error", error: "docker start failed (exit 125): no such runtime",
+      collection: { state: "collected", path: null, report: null }, publication: { state: "disabled" } });
+    expect(settled(record)).toBe(true);
+  }
+  expect((await watching(engine)).rows).toEqual([]);
+  expect([cloud.observations, cloud.downloads, attempts()]).toEqual([0, 0, 0]);
+  setSystemTime();
+
+  // A cancellation during such a launch still ends the run as cancelled.
+  cloud.onLaunch = async record => { await engine.cancel(record.id); throw new LaunchNotStarted(new Error("upload failed")); };
+  const stopped = await engine.launch({ repository: "example", label: "stopped" }).then(() => new Error("the launch did not fail"), failure => failure as Error);
+  expect(await engine.status(stopped.message.match(/Run (\S+):/)![1]!)).toMatchObject({ state: "finished", end: "cancelled", error: "upload failed", collection: { state: "collected", path: null } });
+
+  // Any other launch error can come after the platform accepted the run. The run stays open for `status`.
+  cloud.onLaunch = async () => { throw new Error("connection reset"); };
+  const unsure = await engine.launch({ repository: "example", label: "unsure" }).then(() => new Error("the launch did not fail"), failure => failure as Error);
+  expect(unsure.message).toContain("connection reset Use status to reconcile a possibly accepted launch.");
+  cloud.observation = { code: undefined, complete: null };
+  expect(await engine.status(unsure.message.match(/Run (\S+):/)![1]!)).toMatchObject({ state: "launching", end: null, error: "connection reset", collection: { state: "pending" } });
+});
+
+test("a status call that is in flight when a launch writes its result does not write the old record back", async () => {
+  const { home, cloud, engine } = await fixture({ results: false });
+  // The poll reads the record in the state "launching" and waits for the executor. The launch ends in that time.
+  let poll!: Promise<RunRecord>, release = () => {};
+  const asked = Promise.withResolvers<void>(), observe = cloud.observe.bind(cloud);
+  const hold = () => { cloud.observe = async () => { asked.resolve(); await new Promise<void>(resolve => { release = resolve; }); cloud.observe = observe; return { code: undefined, complete: null }; }; };
+  hold();
+  cloud.onLaunch = async record => { poll = engine.status(record.id); await asked.promise; };
+  const run = await engine.launch({ repository: "example", label: "in-flight" });
+  expect(run).toMatchObject({ state: "running", executor: { runtime_id: `sb-${run.id}` } });
+  release();
+  // The poll gives the record of the launch, and the stored record keeps the state and the runtime ID.
+  expect(await poll).toMatchObject({ state: "running", executor: { runtime_id: `sb-${run.id}` } });
+  const stored = await readRun(home, run.id);
+  expect(stored).toMatchObject({ state: "running", end: null, executor: { runtime_id: `sb-${run.id}` } });
+  expect(stored.last_observed_at).not.toBeNull();
+
+  // The launch failed for certain during the poll. The poll does not put the run back to "launching", and the cause stays.
+  const again = Promise.withResolvers<void>();
+  cloud.observe = async () => { again.resolve(); await new Promise<void>(resolve => { release = resolve; }); cloud.observe = observe; return { code: undefined, complete: null }; };
+  cloud.onLaunch = async record => { poll = engine.status(record.id); await again.promise; throw new LaunchNotStarted(new Error("upload failed: quota")); };
+  const failure = await engine.launch({ repository: "example", label: "failed" }).then(() => new Error("the launch did not fail"), error => error as Error);
+  release();
+  const failed = failure.message.match(/Run (\S+):/)![1]!;
+  expect(await poll).toMatchObject({ state: "finished", end: "error", error: "upload failed: quota" });
+  expect(await readRun(home, failed)).toMatchObject({ state: "finished", end: "error", error: "upload failed: quota", collection: { state: "collected", path: null } });
+
+  // The same for a launch that the platform can have accepted: the text of its error is not lost.
+  const third = Promise.withResolvers<void>();
+  cloud.observe = async () => { third.resolve(); await new Promise<void>(resolve => { release = resolve; }); cloud.observe = observe; return { code: undefined, complete: null }; };
+  cloud.onLaunch = async record => { poll = engine.status(record.id); await third.promise; throw new Error("connection reset"); };
+  const open = await engine.launch({ repository: "example", label: "open" }).then(() => new Error("the launch did not fail"), error => error as Error);
+  release();
+  expect(await poll).toMatchObject({ state: "launching", error: "connection reset" });
+  expect((await readRun(home, open.message.match(/Run (\S+):/)![1]!)).error).toBe("connection reset");
+});
+
+test("cancel fails when the executor does not know a running run, and a cancelled run waits 30 minutes too", async () => {
+  const { home, cloud, engine } = await fixture({ results: false });
+  const run = await engine.launch({ repository: "example", label: "elsewhere" });
+  // Other credentials: the executor knows no runtime, so nothing was asked to stop.
+  cloud.known = false;
+  await expect(engine.cancel(run.id)).rejects.toThrow(`Run ${run.id}: the docker executor does not know this run, so nothing was stopped. Check the credentials and the environment of this command.`);
+  expect(await readRun(home, run.id)).toMatchObject({ state: "running", end: null });
+  // With the right credentials the same command reaches the executor.
+  cloud.known = true;
+  expect(await engine.cancel(run.id)).toMatchObject({ state: "running", end: "cancelled" });
+  expect(cloud.cancelled).toEqual([run.id, run.id]);
+
+  // A cancelled run that the executor does not know is not ended at once. It waits 30 minutes, and then it ends as cancelled.
+  cloud.observation = { code: undefined, complete: null };
+  const lines = await stderrLines(async () => {
+    const doubt = await engine.status(run.id);
+    expect(doubt).toMatchObject({ state: "running", end: "cancelled", finished_at: null });
+    setSystemTime(new Date(Date.parse(doubt.unknown_since!) + LOST_AFTER + 1000));
+    expect(await engine.status(run.id)).toMatchObject({ state: "finished", status: "failed", end: "cancelled" });
+  });
+  expect(lines.map(line => line.replace(/ at \S+; /, " at TIME; ").replace(/since \S+\./, "since TIME."))).toEqual([
+    `Run ${run.id}: the docker executor does not know this run. Check the credentials and the environment of this command. The run is recorded as lost if the answer stays the same for 30 minutes. The first such answer was at TIME; 30 minutes are left.\n`,
+    `Run ${run.id}: the docker executor has not known this run since TIME. The run is recorded as cancelled.\n`,
+  ]);
+  setSystemTime();
+
+  // Before the hand-over no runtime exists, so a cancellation of a launching run is silent.
+  cloud.observation = undefined; cloud.known = false;
+  const early = await engine.launch({ repository: "example", label: "early" });
+  await writeRun(home, { ...early, state: "launching", executor: { ...early.executor, runtime_id: null } });
+  expect(await stderrLines(async () => { expect((await engine.cancel(early.id)).end).toBe("cancelled"); })).toEqual([]);
+});
+
+test("each command warns once about an executor that does not know a run, with the time that is left", async () => {
+  const { home, cloud, engine } = await fixture({ results: false });
+  const run = await engine.launch({ repository: "example", label: "unknown" });
+  cloud.observation = { code: undefined, complete: null };
+  const warning = (minutes: number, since: string) => `Run ${run.id}: the docker executor does not know this run. Check the credentials and the environment of this command. The run is recorded as lost if the answer stays the same for 30 minutes. The first such answer was at ${since}; ${minutes} minutes are left.\n`;
+  let since = "";
+  // One line for many polls of one process.
+  expect(await stderrLines(async () => { since = (await engine.status(run.id)).unknown_since!; await engine.status(run.id); await engine.status(run.id); })).toEqual([warning(30, since)]);
+  // Another process, ten minutes later, with the same answer: the record already has the time, and the line is written again.
+  setSystemTime(new Date(Date.parse(since) + 10 * 60_000));
+  const second = await createEngine(home, async () => cloud);
+  expect(await stderrLines(async () => { await second.status(run.id); await second.status(run.id); })).toEqual([warning(20, since)]);
+  // A third process makes the verdict, and says so.
+  setSystemTime(new Date(Date.parse(since) + 31 * 60_000));
+  const third = await createEngine(home, async () => cloud);
+  expect(await stderrLines(async () => { expect((await third.status(run.id)).end).toBe("lost"); })).toEqual([`Run ${run.id}: the docker executor has not known this run since ${since}. The run is recorded as lost.\n`]);
+});
+
+test("a run that ended without a completion record is asked about again, and a wrong verdict is corrected", async () => {
+  const { cloud, engine } = await fixture({ results: false });
+  // The worker was stopped by the platform. Its record was written, but the store did not show it at the first look.
+  const late = await engine.launch({ repository: "example", label: "late-record" });
+  cloud.observation = { code: 124, runtime_id: `sb-${late.id}`, complete: null };
+  const first = await engine.status(late.id);
+  expect(first).toMatchObject({ state: "finished", status: "failed", end: "error", exit_code: 124, unrecorded: true, collection: { state: "collected", report: null } });
+  expect(settled(first)).toBe(true);
+  // The same answer changes nothing, and the package is not downloaded again.
+  expect(await engine.status(late.id)).toEqual(first);
+  expect([cloud.observations, cloud.downloads]).toEqual([2, 1]);
+  // The record and the report show later. The next status uses them and collects again.
+  cloud.observation = undefined;
+  cloud.finish(late.id, "# Report\nWritten before the stop.");
+  let found!: RunRecord;
+  expect(await stderrLines(async () => { found = await engine.status(late.id); })).toEqual([`Run ${late.id}: the completion record is there now. The run is collected again.\n`]);
+  expect(found).toMatchObject({ state: "finished", status: "succeeded", end: "completed", exit_code: 0, collection: { state: "collected" } });
+  expect(found.unrecorded).toBeUndefined();
+  expect(await readFile(found.collection.report!, "utf8")).toContain("Written before the stop.");
+  expect(cloud.downloads).toBe(2);
+  // A run with its record is final: the executor is not asked again.
+  await engine.status(late.id);
+  expect(cloud.observations).toBe(3);
+
+  // A run was recorded as lost with the wrong credentials. With the right ones the executor has it alive.
+  const alive = await engine.launch({ repository: "example", label: "alive" });
+  cloud.observation = { code: undefined, complete: null };
+  cloud.downloadFailure = "Docker volume was not found";
+  await stderrLines(async () => {
+    const doubt = await engine.status(alive.id);
+    setSystemTime(new Date(Date.parse(doubt.unknown_since!) + LOST_AFTER + 1000));
+    expect(await engine.status(alive.id)).toMatchObject({ state: "finished", end: "lost", unrecorded: true, collection: { state: "failed" } });
+  });
+  cloud.observation = undefined; cloud.downloadFailure = undefined;
+  let revived!: RunRecord;
+  expect(await stderrLines(async () => { revived = await engine.status(alive.id); })).toEqual([`Run ${alive.id}: the docker executor knows this run again, and it runs. The record of its end (lost) is dropped.\n`]);
+  expect(revived).toMatchObject({ state: "running", status: "pending", end: null, exit_code: null, finished_at: null, collection: { state: "pending", path: null, report: null } });
+  expect([revived.error, revived.unrecorded, revived.unknown_since]).toEqual([undefined, undefined, undefined]);
+  cloud.finish(alive.id, "# Report");
+  expect(await engine.status(alive.id)).toMatchObject({ state: "finished", status: "succeeded", end: "completed", collection: { state: "collected" } });
+
+  // An executor that cannot be asked does not fail the status of a run that has ended. The run stays as it is.
+  const gone = await engine.launch({ repository: "example", label: "gone" });
+  cloud.observation = { code: 137, complete: null };
+  const ended = await engine.status(gone.id);
+  const observe = cloud.observe.bind(cloud);
+  cloud.observe = async () => { throw new Error("The docker command was not found."); };
+  try {
+    let same!: RunRecord;
+    expect(await stderrLines(async () => { same = await engine.status(gone.id); })).toEqual([`Run ${gone.id}: the docker executor could not be asked again for the completion record (The docker command was not found.). The run stays as it is.\n`]);
+    expect(same).toEqual(ended);
+  } finally { cloud.observe = observe; }
+});
+
+test("a short value of an environment variable with KEY or TOKEN in its name does not change the package", async () => {
+  const { cloud, engine } = await fixture({ results: false });
+  const run = await engine.launch({ repository: "example", label: "words" });
+  const report = "# Report\nF-1: `paused` stays false after 10 blocks. Not a false positive.\n";
+  cloud.finish(run.id, report);
+  cloud.outputs.set(run.id, { "raw/notes-1.txt": "host token: a-long-host-token-value\n" });
+  const names = ["KEYTIMEOUT", "TOKENIZERS_PARALLELISM", "ULTRAFUZZ_TEST_HOST_TOKEN"] as const, saved = names.map(name => process.env[name]);
+  Object.assign(process.env, { KEYTIMEOUT: "1", TOKENIZERS_PARALLELISM: "false", ULTRAFUZZ_TEST_HOST_TOKEN: "a-long-host-token-value" });
+  try {
+    const done = await engine.status(run.id);
+    expect(await readFile(done.collection.report!, "utf8")).toBe(report);
+    const packaged = done.collection.path!;
+    expect(await readFile(join(packaged, "raw/transcript.jsonl"), "utf8")).toBe('{"text":"work"}\n');
+    expect(await readFile(join(packaged, "run.yml"), "utf8")).toContain(`id: ${run.id}\n`);
+    // A value of a usual length is still replaced.
+    expect(await readFile(join(packaged, "raw/notes-1.txt"), "utf8")).toBe("host token: [REDACTED]\n");
+  } finally { names.forEach((name, index) => { if (saved[index] === undefined) delete process.env[name]; else process.env[name] = saved[index]; }); }
+});
+
 test("a prepared run is ended by a cancellation only, without the executor", async () => {
   const { home, cloud, engine } = await fixture({ results: false });
   const run = await engine.launch({ repository: "example", label: "prepared" });
@@ -952,7 +1161,9 @@ test("a record from the store cannot change what the host decided at launch", as
     executor: { ...remote.executor, cpu: 64, volume_name: "another-volume" },
   });
   const done = await engine.status(run.id);
-  expect(done).toMatchObject({ label: "host-owned", source: run.source, profile: { name: "v2/pareto", sha256: "c".repeat(64) }, harness: { name: "opencode", model: "provider/example", version: "9.9.9" } });
+  // The profile digest is the one that the host made at launch, not a value from the store.
+  expect(run.profile.sha256).toMatch(/^[a-f0-9]{64}$/);
+  expect(done).toMatchObject({ label: "host-owned", source: run.source, profile: run.profile, harness: { name: "opencode", model: "provider/example", version: "9.9.9" } });
   expect(done.executor).toEqual(run.executor);
   expect(done.collection.state).toBe("collected");
   expect(done.collection.error).toBeUndefined();

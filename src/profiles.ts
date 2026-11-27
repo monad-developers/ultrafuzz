@@ -1,3 +1,4 @@
+import { isUtf8 } from "node:buffer";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -6,9 +7,16 @@ import { HARNESSES, type Harness, type InputRecord, type Profile } from "./types
 export const bundledProfilesDirectory = resolve(import.meta.dir, "../profiles");
 const catalogRoot = () => resolve(process.env.ULTRAFUZZ_PROFILE_DIR || bundledProfilesDirectory);
 
+/**
+ * Files that tools leave in a profile directory and that are no part of the profile: Python bytecode and the
+ * folder file of macOS. They are not listed, not hashed, not staged and not installed.
+ */
+export const profileLitter = (name: string) => name === "__pycache__" || name === ".DS_Store" || name.endsWith(".pyc");
+
 async function files(directory: string, prefix = ""): Promise<string[]> {
   const result: string[] = [];
   for (const entry of (await readdir(join(directory, prefix), { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name, "en"))) {
+    if (profileLitter(entry.name)) continue;
     const path = join(prefix, entry.name);
     if (entry.isSymbolicLink()) throw new Error(`Profile symlinks are unsupported: ${path}`);
     if (entry.isDirectory()) result.push(...await files(directory, path));
@@ -77,6 +85,8 @@ export async function stageProfile(profile: Profile, destination: string): Promi
   const digest = createHash("sha256");
   for (const path of paths) {
     const bytes = await readFile(join(source, path));
+    // The collector accepts only text below raw/profile. A file that is not text would fail the collection after the audit, so it fails the launch.
+    if (bytes.includes(0) || !isUtf8(bytes)) throw new Error(`Profile ${profile.name} has a file that is not UTF-8 text: ${path.split(sep).join("/")}. Remove it from ${source}, or run ultrafuzz init again after you delete the installed profiles.`);
     digest.update(path.split(sep).join("/")).update("\0").update(String(bytes.length)).update("\0").update(bytes);
     await mkdir(dirname(join(target, path)), { recursive: true });
     await writeFile(join(target, path), bytes);

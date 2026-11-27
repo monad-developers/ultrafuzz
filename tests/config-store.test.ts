@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initWorkspace, loadConfig } from "../src/config";
@@ -29,6 +29,25 @@ function record(id = "20261103-120000-aabbccdd"): RunRecord {
     publication: { state: "disabled", repository: null, branch: `ultrafuzz/${id}`, path: `attempts/test/runs/${id}`, pr_url: null },
   };
 }
+
+test("workspace init does not install Python bytecode or folder files that a tool left in the bundled profiles", async () => {
+  // The Pareto profile has Python scripts and tests. A run of them without PYTHONDONTWRITEBYTECODE leaves such a directory.
+  const relative = "v2/pareto/skills/pareto-security-review/scripts", scripts = join(import.meta.dir, "../profiles", relative), cache = join(scripts, "__pycache__");
+  const created = await mkdir(cache, { recursive: true }), bytecode = join(cache, `ultrafuzz-test-${process.pid}.pyc`), folder = join(scripts, `.DS_Store`);
+  const folderExisted = await Bun.file(folder).exists();
+  await writeFile(bytecode, Buffer.from([0, 1, 2]));
+  if (!folderExisted) await writeFile(folder, Buffer.from([0, 0, 0, 1]));
+  try {
+    const home = await temporary(); await initWorkspace(home);
+    const installed = await readdir(join(home, "prompts", relative));
+    expect(installed.length).toBeGreaterThan(0);
+    expect(installed.filter(name => name === "__pycache__" || name === ".DS_Store" || name.endsWith(".pyc"))).toEqual([]);
+  } finally {
+    await rm(bytecode, { force: true });
+    if (!folderExisted) await rm(folder, { force: true });
+    if (created) await rm(cache, { recursive: true, force: true });
+  }
+});
 
 test("workspace init installs profiles and preserves user config and profile edits", async () => {
   const home = await temporary(); await initWorkspace(home);

@@ -15,6 +15,8 @@ jobs:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile
       - run: bun run check
+      # The tests import the source. This step runs the built command line, which every README command uses. It stays offline.
+      - run: bun dist/cli.js --version && bun dist/cli.js --home "$RUNNER_TEMP/uf" init && bun dist/cli.js --home "$RUNNER_TEMP/uf" profiles
   # The Docker executor against a real Docker Engine. No model is called and no secret is used.
   docker:
     runs-on: ubuntu-latest

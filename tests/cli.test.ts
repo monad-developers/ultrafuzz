@@ -448,6 +448,49 @@ test("launch flags select the executor and publication, and are checked before l
   expect((await cli("list", "--home", home)).out).toContain("No runs yet.");
 });
 
+test("launch --revision audits the named commit, and the flag stays a launch flag", async () => {
+  const home = await workspace(), source = join(home, "source-repository");
+  await mkdir(source);
+  const git = async (...args: string[]) => {
+    const child = Bun.spawn(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd: source, stdout: "pipe", stderr: "pipe" });
+    expect(await child.exited).toBe(0);
+    return (await new Response(child.stdout).text()).trim();
+  };
+  await git("init", "-q", "--initial-branch=main");
+  await writeFile(join(source, "contract.sol"), "contract Old {}\n");
+  await git("add", "."); await git("commit", "-qm", "old");
+  const old = await git("rev-parse", "HEAD");
+  await writeFile(join(source, "contract.sol"), "contract New {}\n");
+  await git("add", "."); await git("commit", "-qm", "new");
+  const head = await git("rev-parse", "HEAD");
+  await writeFile(join(home, "ultrafuzz.toml"), (await readFile(join(home, "ultrafuzz.toml"), "utf8")).replace('"https://github.com/example/source"', JSON.stringify(source)));
+  process.env.ULTRAFUZZ_CLI_TEST_KEY = "not-a-real-key";
+  executors = async () => ({ ...await noExecutor("docker"), launch: async () => "container-1" });
+  const commit = async (...flags: string[]) => {
+    const launched = await cli("launch", "example", "--label", "pinned", ...flags, "--json", "--home", home);
+    expect(launched.code).toBe(0);
+    const { id: run } = JSON.parse(launched.out) as { id: string };
+    return (JSON.parse(await readFile(join(home, "runs", run, "run.json"), "utf8")) as RunRecord).source.commit;
+  };
+  expect(await commit("--revision", old)).toBe(old);
+  expect(await commit()).toBe(head);
+  // The check of the value is the one of the source step, and the flag applies to no other command.
+  expect((await cli("launch", "example", "--label", "bad", "--revision=--upload-pack=x", "--home", home)).err).toContain("Invalid repository revision");
+  for (const command of ["status", "collect", "watch"]) expect((await cli(command, id, "--revision", old, "--home", home)).err).toContain(`--revision does not apply to ${command}.`);
+});
+
+test("every flag of the launch options in --help is accepted by launch", async () => {
+  const home = await workspace();
+  const block = (await cli("--help")).out.split("Launch options:")[1]!.split("\n\n")[0]!;
+  const flags = [...block.matchAll(/^  (--[a-z-]+)( <)?/gm)].map(match => ({ name: match[1]!, value: !!match[2] }));
+  expect(flags.length).toBeGreaterThan(10);
+  for (const { name, value } of flags) {
+    // No key is set, so each launch ends at a later check. None may end at the check of the flag list.
+    const result = await cli("launch", "example", "--label", "one", name, ...(value ? ["x"] : []), "--home", home);
+    expect(result.err.includes("does not apply to launch") ? name : "").toBe("");
+  }
+});
+
 test("the version is an experimental semver that matches package.json, and the README documents every command and flag of --help", async () => {
   const root = join(import.meta.dir, "..");
   const version = (await cli("--version")).out.trim();

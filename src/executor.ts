@@ -20,17 +20,36 @@ export const WORKER_COMMAND = ["sh", "-c", `mkdir -p /opt/ultrafuzz && cp -R ${R
  */
 export interface Observation { code: number | null | undefined; runtime_id?: string; complete: RunRecord | null }
 
+/**
+ * A launch that failed, when the executor is sure that nothing of the run is left on the platform: nothing was
+ * created, or everything that was created was removed again. The core then ends the run at once. After any
+ * other launch error the platform can have accepted the run, so the core keeps the run for `status` to reconcile.
+ */
+export class LaunchNotStarted extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "LaunchNotStarted";
+  }
+}
+
 /** The contract between the core and one execution platform. The core owns everything else. */
 export interface Executor {
   /** Optional host checks and image preparation. It creates nothing for the run, so a failure here is a plain failed launch. */
   prepare?(record: RunRecord): Promise<void>;
-  /** Copy `staging` to a new per-run store, start the detached worker and return its runtime ID. */
+  /**
+   * Copy `staging` to a new per-run store, start the detached worker and return its runtime ID.
+   * It throws LaunchNotStarted when it failed and nothing of the run is left on the platform.
+   */
   launch(record: RunRecord, staging: string, key: string): Promise<string>;
   observe(record: RunRecord): Promise<Observation>;
   /** Copy the worker's `outputs` directory to `destination`. Returns the paths it had to skip. */
   download(record: RunRecord, destination: string): Promise<RunRecord["omitted"]>;
-  /** Ask the worker to stop, then enforce the five-minute grace period. Storage is kept. */
-  cancel(record: RunRecord): Promise<void>;
+  /**
+   * Ask the worker to stop, then enforce the five-minute grace period. Storage is kept.
+   * The result is false when the platform knows no runtime of the run, so nothing was asked to stop.
+   * A runtime that has already ended is known: the result is true.
+   */
+  cancel(record: RunRecord): Promise<boolean>;
   /** Read run records from retained stores, for one run or for every run found. Launches nothing. */
   recover(config: Config, id?: string): Promise<RunRecord[]>;
 }

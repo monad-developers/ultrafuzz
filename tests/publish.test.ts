@@ -153,3 +153,99 @@ test("unowned collisions are refused without deleting external evidence", async 
   expect(result.stderr).toContain("overwrite an external file");
   expect(await git(["show", `${branch}:${runPath}/report.md`], f.remote)).toBe("External report\n");
 });
+
+/** A `git` that comes first on PATH. It runs the real git and then writes one JSON line for the call: arguments, prompt setting and the files of the working tree. */
+async function recordingGit(f: Awaited<ReturnType<typeof fixture>>): Promise<() => Promise<Array<{ args: string[]; prompt: string | null; files: string[] }>>> {
+  const log = join(f.root, "git.log");
+  await writeFile(join(f.bin, "git"), `#!${process.execPath}
+import { appendFile, readdir } from "node:fs/promises";
+const args = process.argv.slice(2);
+const child = Bun.spawn([process.env.TEST_GIT, ...args], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+const code = await child.exited;
+let files = [];
+try { files = (await readdir(".", { recursive: true })).filter(name => !name.startsWith(".git/") && name !== ".git").sort(); } catch {}
+await appendFile(${JSON.stringify(log)}, JSON.stringify({ args, prompt: process.env.GIT_TERMINAL_PROMPT ?? null, files }) + "\\n");
+process.exit(code);
+`);
+  await chmod(join(f.bin, "git"), 0o755);
+  return async () => (await readFile(log, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+}
+
+test("files that an ignore rule of the results repository matches are published all the same", async () => {
+  const f = await fixture();
+  // As from a .gitignore template: logs and library directories are ignored.
+  await writeFile(join(f.seed, ".gitignore"), "*.log\nlib/\nbuild/\n");
+  await git(["add", ".gitignore"], f.seed); await git(["commit", "-m", "Ignore rules"], f.seed); await git(["push", "origin", "main"], f.seed);
+  await mkdir(join(f.artifacts, "raw/workspace/lib"), { recursive: true });
+  await writeFile(join(f.artifacts, "raw/stderr.log"), "stderr\n");
+  await writeFile(join(f.artifacts, "raw/worker.log"), "worker\n");
+  await writeFile(join(f.artifacts, "raw/workspace/lib/Harness.sol"), "contract Harness {}\n");
+  expect((await f.publish()).code).toBe(0);
+  const tree = (await git(["ls-tree", "-r", "--name-only", branch], f.remote)).trim().split("\n");
+  const manifest = JSON.parse(await git(["show", `${branch}:${runPath}/.ultrafuzz-files.json`], f.remote)) as { files: string[] };
+  // The commit holds each file that the ownership manifest names.
+  expect(manifest.files).toEqual(["raw/stderr.log", "raw/worker.log", "raw/workspace/lib/Harness.sol", "report.md", "run.yml"]);
+  for (const file of manifest.files) expect(tree).toContain(`${runPath}/${file}`);
+  // A second publication of the same package changes nothing, and a file that is no longer in the package is removed.
+  const head = await git(["rev-parse", branch], f.remote);
+  expect((await f.publish()).code).toBe(0);
+  expect(await git(["rev-parse", branch], f.remote)).toBe(head);
+  await rm(join(f.artifacts, "raw/worker.log"));
+  expect((await f.publish()).code).toBe(0);
+  expect(await git(["ls-tree", "-r", "--name-only", branch], f.remote)).not.toContain("raw/worker.log");
+});
+
+test("git gets its GitHub credentials from gh and never asks at the terminal", async () => {
+  const f = await fixture(), calls = await recordingGit(f);
+  expect((await f.publish()).code).toBe(0);
+  const seen = await calls();
+  for (const verb of ["ls-remote", "fetch", "checkout", "add", "commit", "push"]) expect(seen.some(call => call.args.includes(verb)) ? "" : verb).toBe("");
+  for (const call of seen) {
+    expect(call.prompt).toBe("0");
+    // The helper of github.com is reset and then set to gh. Other hosts and local remotes keep the configuration of the user.
+    const text = call.args.join(" ");
+    expect(text).toContain("-c credential.https://github.com.helper= -c credential.https://github.com.helper=!gh auth git-credential");
+    expect(text).toContain("-c core.hooksPath=/dev/null -c commit.gpgsign=false");
+    expect(text).not.toMatch(/-c credential\.helper=/);
+  }
+});
+
+test("only the directory of the run is checked out, whatever the results repository already holds", async () => {
+  const f = await fixture();
+  // Two earlier runs are merged in the results repository, and a link stands where a label directory could be.
+  for (const path of [`attempts/baseline/runs/20261101-000000-00000001/report.md`, `attempts/other/runs/20261102-000000-00000002/raw/transcript.jsonl`, "attempts/note.txt"]) {
+    await mkdir(join(f.seed, path, ".."), { recursive: true });
+    await writeFile(join(f.seed, path), "earlier result\n");
+  }
+  await git(["add", "."], f.seed); await git(["commit", "-m", "Earlier runs"], f.seed); await git(["push", "origin", "main"], f.seed);
+  const calls = await recordingGit(f);
+  expect((await f.publish()).code).toBe(0);
+  const checkouts = (await calls()).filter(call => call.args.includes("checkout") && !call.args.includes("sparse-checkout"));
+  expect(checkouts.length).toBeGreaterThan(0);
+  for (const { files } of checkouts) {
+    // The files next to each parent directory are there, so a link on the path is still seen. The other runs are not.
+    expect(files).toContain("README.md");
+    expect(files).toContain("attempts/note.txt");
+    expect(files.filter(name => name.includes("20261101-000000-00000001") || name.includes("attempts/other/"))).toEqual([]);
+  }
+  // The commit keeps the files that were not checked out.
+  const tree = await git(["ls-tree", "-r", "--name-only", branch], f.remote);
+  for (const path of [`${runPath}/report.md`, "attempts/baseline/runs/20261101-000000-00000001/report.md", "attempts/other/runs/20261102-000000-00000002/raw/transcript.jsonl"]) expect(tree).toContain(path);
+
+  // A link where the label directory would be is refused, as with a full checkout.
+  const linked = await fixture();
+  await mkdir(join(linked.seed, "attempts")); await mkdir(join(linked.seed, "elsewhere"));
+  await writeFile(join(linked.seed, "elsewhere/keep.txt"), "external\n");
+  await Bun.spawn(["ln", "-s", "../elsewhere", join(linked.seed, "attempts/baseline")]).exited;
+  await git(["add", "."], linked.seed); await git(["commit", "-m", "A link"], linked.seed); await git(["push", "origin", "main"], linked.seed);
+  const refused = await linked.publish();
+  expect(refused.code).toBe(1);
+  expect(refused.stderr).toContain("Unsafe repository path");
+
+  // A git that cannot do a sparse checkout still publishes, with the whole tree.
+  const old = await fixture();
+  await writeFile(join(old.bin, "git"), `#!/bin/sh\nfor arg in "$@"; do if [ "$arg" = "sparse-checkout" ]; then echo "git: 'sparse-checkout' is not a git command." >&2; exit 1; fi; done\nexec "$TEST_GIT" "$@"\n`);
+  await chmod(join(old.bin, "git"), 0o755);
+  expect((await old.publish()).code).toBe(0);
+  expect(await git(["show", `${branch}:${runPath}/report.md`], old.remote)).toBe("Report one\n");
+});

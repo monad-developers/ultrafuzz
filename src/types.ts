@@ -66,6 +66,9 @@ export interface Continuation {
   minutes_left: number;
   exit_code: number | null;
   report_after: boolean;
+  /** How the first harness call ended. `end` and `exit_code` of the record describe the last call. Absent in older records. */
+  initial_end?: "completed" | "error" | "timeout";
+  initial_exit_code?: number | null;
 }
 
 export interface RunRecord {
@@ -86,6 +89,11 @@ export interface RunRecord {
   last_observed_at: string | null;
   /** Host-owned. Since when the platform has not known a run that the host holds as running. Absent or null when it knows the run. */
   unknown_since?: string | null;
+  /**
+   * Host-owned. True when the host ended the run without the worker's completion record. A later `status`
+   * asks the executor again, and uses the record if it is there then.
+   */
+  unrecorded?: boolean;
   session_id: string | null;
   continuation: Continuation | null;
   inputs: InputRecord[];

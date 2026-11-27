@@ -1,5 +1,5 @@
 import { join, resolve } from "node:path";
-import { createEngine, settled, type Publisher } from "./engine";
+import { WATCH_ATTEMPTS, createEngine, settled, type Publisher } from "./engine";
 import { loadConfig } from "./config";
 import type { ExecutorSource } from "./executor";
 import { listProfiles } from "./profiles";
@@ -17,6 +17,8 @@ const headers = {
   "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
 };
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers });
+/** The pause before the second automatic attempt of a failed collection or publication, in milliseconds. Each later pause is twice as long, as in `watch`. */
+const RETRY = 2 * 60_000;
 
 /** Returns a function that stops the server. `executors` and `publisher` replace the real ones in tests. */
 export async function serveDashboard(home: string, port = 3000, executors?: ExecutorSource, publisher?: Publisher): Promise<() => void> {
@@ -24,13 +26,32 @@ export async function serveDashboard(home: string, port = 3000, executors?: Exec
   const engine = await createEngine(home, executors, publisher);
   // Avoid overlapping collectors when multiple browser tabs poll at once.
   let refresh: Promise<RunRecord[]> | undefined;
+  // The list is refreshed every few seconds. A collection or a publication that failed is not tried again at each
+  // refresh: the attempts move apart (2, 4, 8 and 16 minutes) and end after five failures in a row, as in `watch`.
+  // The counts live in this process. `collect`, `status` and the page of one run still try at once.
+  const failing = new Map<string, { step: string; failures: number; retryAt: number }>();
+  const step = (record: RunRecord) => `${record.collection.state}/${record.publication.state}`;
+  const refreshed = async (record: RunRecord): Promise<RunRecord> => {
+    if (settled(record)) { failing.delete(record.id); return record; }
+    const held = failing.get(record.id);
+    // Another command changed the run: the count starts again.
+    if (held && (record.state !== "finished" || step(record) !== held.step)) failing.delete(record.id);
+    else if (held && (held.failures >= WATCH_ATTEMPTS || Date.now() < held.retryAt)) return record;
+    const next = await engine.status(record.id);
+    if (next.state !== "finished" || settled(next)) failing.delete(record.id);
+    else {
+      // The run ended and something is left: the collection or the publication failed in this call.
+      const failures = (failing.get(record.id)?.step === step(next) ? failing.get(record.id)!.failures : 0) + 1;
+      failing.set(record.id, { step: step(next), failures, retryAt: Date.now() + RETRY * 2 ** (failures - 1) });
+    }
+    return next;
+  };
   const runs = () => refresh ??= (async () => {
     const records = await engine.list();
     const updates: RunRecord[] = [];
     for (let index = 0; index < records.length; index += 4) {
       const batch = records.slice(index, index + 4);
-      const observed = await Promise.allSettled(batch.map(async record =>
-        settled(record) ? record : await engine.status(record.id)));
+      const observed = await Promise.allSettled(batch.map(refreshed));
       updates.push(...observed.map((result, offset) => result.status === "fulfilled" ? result.value : batch[offset]!));
     }
     return updates;

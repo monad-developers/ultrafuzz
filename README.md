@@ -136,9 +136,15 @@ With `--json`, each command prints one JSON object with a `schema` field. `watch
 
 `status`, `wait` and `watch` collect a run that has ended. A failed collection or publication is tried again on the next `status`, `wait` or `collect`, and in a later cycle of `watch`. Plain `collect` does nothing when the run is already collected and, if publication is on, published.
 
-A launch can fail before the run reaches the executor, for example when Docker is not installed or the clone fails. Such a run is recorded as failed. It has nothing to collect, and `status` prints the cause. If a launch is killed while it prepares the run, the record stays in the state `prepared`. Use `cancel` and then `status` to end it.
+A launch can fail before the run reaches the executor, for example when Docker is not installed or the clone fails. A launch can also fail at the executor, for example when Docker cannot start the container or Modal refuses the sandbox. The executor then removes what it created. In both cases the run is recorded as failed at once. It has nothing to collect, and `status` prints the cause. If the executor cannot confirm that nothing is left, the run stays in the state `launching`: the error text says `Use status to reconcile a possibly accepted launch`, and `status` records such a run as lost after 30 minutes. If a launch is killed while it prepares the run, the record stays in the state `prepared`. Use `cancel` and then `status` to end it.
 
-The dashboard lists the runs of all configured repositories. It can launch and cancel runs, and it links the local report. It listens only on `127.0.0.1`.
+A run can end without the completion record of its worker, for example when the executor stopped the worker or did not know the run for 30 minutes. `status` on such a run asks the executor again. If the record is there then, the run is collected again. If the executor has the run alive, the run is active again. `watch` and the dashboard do this only while the run is not settled.
+
+A failed launch from an earlier commit of this release can be recorded as a lost run whose collection fails each time, because the executor removed its volume. No command repairs such a record. Delete its directory `~/.ultrafuzz/runs/<run-id>/`.
+
+`cancel` fails when the executor does not know a run that is recorded as running, and it changes nothing then: nothing was stopped. This happens with other credentials, another Modal environment or another Docker host. It also happens when the container of a running run was removed by hand. Such a run ends as lost after 30 minutes.
+
+The dashboard lists the runs of all configured repositories. It can launch and cancel runs, and it links the local report. It listens only on `127.0.0.1`. While it runs, it refreshes each run that is not settled every 5 seconds, so it also collects and publishes. It does not try a failed collection or publication again at each refresh: the next attempts come after 2, 4, 8 and 16 minutes, and after five failures in a row it leaves the run alone until it is restarted. `collect <id>` and `status <id>` always try at once.
 
 ### Watch many runs
 
@@ -153,7 +159,7 @@ bun dist/cli.js watch RUN_ID RUN_ID        # these runs only
 A run is settled when it has ended, it is collected, and it is published if publication is on. A run that ended without a report is settled when its evidence is collected.
 
 - **Runs.** With IDs, `watch` watches those runs. With `--label`, it watches the runs with that label. In these two cases the summary also shows the runs that were settled before. With neither, it watches every local run that is not settled. This includes old runs whose collection or publication failed: `watch` tries them again, and it exits with code 1 if they fail again. Without IDs, each cycle also picks up the runs that were launched after the watch started.
-- **Credentials.** Start `watch` with the same executor credentials as the launches. For Modal, use the same profile and environment. If the executor does not know a running run, `status` and `watch` write one line to standard error and keep the run as it is. The run is recorded as lost only when the answer stays the same for 30 minutes, and that record is final. So run `status <id>` on one run first, and read standard error.
+- **Credentials.** Start `watch` with the same executor credentials as the launches. For Modal, use the same profile and environment. If the executor does not know a running run, `status` and `watch` keep the run as it is. Each command writes one line to standard error for such a run, with the time of the first such answer and the minutes that are left. The run is recorded as lost only when the answer stays the same for 30 minutes, and the command that records it writes one more line. A cancelled run waits the same 30 minutes. A later `status <id>` with the right credentials corrects a wrong record, but `watch` does not look at a settled run again. So run `status <id>` on one run first, and read standard error.
 - **Output.** One line for each change: a run started, a run ended, a run was collected (with the path of the report), a collection or publication failed, a run was published, a run was given up. A run that already runs when the watch starts gets no `started` line, so standard output can stay empty until the first run ends. At the end there is a summary. Its first line counts the runs, the runs with a report, the settled runs, the watch failures and the runs that are not settled. Then there is one line for each run: ID, label, repository, outcome, the failed step if there is one, the path of `report.md` or `no report`, and the pull request if there is one. An ID without a usable record gives the line `<id>  unknown run`. A watch failure is a run whose collection or requested publication failed, a run that was given up, or an ID without a usable record. A failed audit is not a watch failure.
 - **JSON.** With `--json`, each line on standard output is a JSON object with `"schema": "ultrafuzz.watch.v2"`, a `type` and the time `at`. Use this mode for a log: the text lines have no time. An argument error, or a registry that cannot be read in the first cycle, gives one line with the schema `ultrafuzz.error.v2` and no summary.
   - A change has the type `started`, `ended`, `collected`, `collection_failed`, `published`, `publication_failed` or `gave_up`. Its fields are `id`, `label`, `repository`, `state`, `status`, `end`, `executor`, `collection`, `publication`, `package_path`, `report_path` and `pr_url`. A failure also has `error`, and `attempt` and `attempts` for a collection or publication.
@@ -186,7 +192,7 @@ A run is settled when it has ended, it is collected, and it is published if publ
 | `v2/property-specification-collaborative` | Eight lenses each write a property catalog and share one log file. A fan-in merges the catalogs into `report.md` with stable IDs (`P-001`, ...). Work in progress. | `claude-code`, `opencode`, `codex` | The source. Optional offline copies of the pinned references. |
 | `v2/stateful-fuzzing` | Implements the supplied properties and runs a bounded stateful fuzzing campaign. | `claude-code`, `opencode`, `codex` | The source and a properties report (`--properties`, required). |
 
-None of the three has completed a live run on this runner. The only deliverable of each profile is `report.md`. A launch with a harness that the profile does not list fails before execution.
+Only `v2/pareto` has completed live runs on this runner: three, on Modal with OpenCode. The other two profiles have not completed one. The only deliverable of each profile is `report.md`. A launch with a harness that the profile does not list fails before execution.
 
 **Property specification.** Each lens studies one or two external references, pinned by repository and commit. The profile does not contain their text. A lens downloads them during the run. To supply one offline, pass a snapshot of its repository as an input with the reference ID as its name, for example `--input reference-properties-crytic=./crytic-properties`. The IDs are in `skills/property-specification-collaborative/references.md` in the profile. When the harness can start subagents, the lenses run as subagents in two groups of four. Otherwise they run one after another in the same session.
 
@@ -207,7 +213,7 @@ bun dist/cli.js launch example --label fuzz-custom \
 
 **A profile is trusted.** The runner generates the harness configuration: the model, the OpenRouter route and the permissions. A profile's `config/` file is merged over it and can replace any of these values. A changed route can send the OpenRouter key to another endpoint. Only the `*.env.json` files are restricted: they cannot set credentials or configuration paths. Read a profile before you install it, as you read code before you run it.
 
-The run records the package version, the profile name and a digest of the installed profile files. Agent customization files in the audited repository, such as `CLAUDE.md` and `AGENTS.md`, are not loaded.
+The run records the package version, the profile name and a digest of the installed profile files. The host makes the digest at launch, and it is the same for every harness and model. Python bytecode (`__pycache__`, `*.pyc`) and `.DS_Store` files in a profile directory are not part of the profile: they are not installed, not hashed and not sent to the worker. Every other profile file must be UTF-8 text. A launch fails and names the file if one is not. Agent customization files in the audited repository, such as `CLAUDE.md` and `AGENTS.md`, are not loaded.
 
 `init` does not overwrite installed profiles. If `~/.ultrafuzz/prompts` holds profiles from an earlier checkout, delete that directory and run `init` again.
 
@@ -252,7 +258,7 @@ The `threat-model` input is optional. Without it, the coordinating session write
 
 ## Example launches
 
-These are three small public repositories: one Foundry project, one Hardhat project and one Vyper project. The commands below are correct for the code, but no such launch has completed yet.
+These are three small public repositories: one Foundry project, one Hardhat project and one Vyper project. The commands below are correct for the code. Three `v2/pareto` runs have completed on these repositories (see [Pareto v2](#pareto-v2-work-in-progress)). No launch with the property-specification or stateful-fuzzing commands below has completed yet.
 
 Each entry pins the commit to audit with `revision`. Without `revision`, the runner clones the default branch. The run record shows the commit in both cases. Add the three repositories to `~/.ultrafuzz/ultrafuzz.toml`:
 
@@ -289,7 +295,7 @@ bun dist/cli.js launch very-liquid-vaults --label fuzz \
 
 Each run uses the CPUs and memory of the `[docker]` table at the same time as the others. On a small machine, launch one run and wait for it before you launch the next.
 
-`--revision <ref>` on `launch` overrides the configured revision for one run. The image has two Vyper compilers, but Slither supports Vyper only in part, so expect a weaker result on the Vyper target. See [Tools in the worker image](#tools-in-the-worker-image).
+`--revision <ref>` on `launch` overrides the configured revision for one run. A run with a revision gets the tree of that commit and the submodules of that commit only. The image has two Vyper compilers, but Slither supports Vyper only in part, so expect a weaker result on the Vyper target. See [Tools in the worker image](#tools-in-the-worker-image).
 
 ## Executors
 
@@ -302,7 +308,7 @@ Each run has one detached container and one named volume. Both are named `ultraf
 Read these points before you use it:
 
 - **The key is readable through Docker.** The OpenRouter key is in the environment of the container. Anyone who can use Docker on that machine can read it, for example with `docker inspect`. It stays there after the run ended, until you remove the container. Use a key with a spending limit.
-- **Nothing is deleted automatically.** The container, the volume, the worker image and the local files of every run stay until you remove them. The one exception is a launch that failed before its container started: its container and its volume are removed.
+- **Nothing is deleted automatically.** The container, the volume, the worker image and the local files of every run stay until you remove them. The one exception is a launch that failed before its container started: its container and its volume are removed, and the run is recorded as failed with nothing to collect.
 - **The first image build takes a long time.** Without `image` under `[docker]`, the first launch builds the package Dockerfile as `ultrafuzz-worker:<hash>`. Later launches use that image again. With `image` set, that image is used as it is, and it is pulled when it is absent.
 - **A run does not survive the host.** The container continues when the command line exits. It does not continue after a host restart or a stop of the Docker daemon. `recover` rebuilds local records from retained volumes. It does not continue an audit.
 
@@ -310,6 +316,7 @@ List what Ultrafuzz left in Docker:
 
 ```sh
 docker ps -a --filter label=ultrafuzz.run
+docker ps -a --filter label=ultrafuzz.reader   # Reader containers that a stopped command left.
 docker volume ls --filter label=ultrafuzz.run
 docker image ls --filter label=ultrafuzz.dockerfile
 ```
@@ -320,10 +327,11 @@ List and remove the container and the volume of one run. Replace `RUN_ID`.
 docker ps -a --filter label=ultrafuzz.run=RUN_ID
 docker volume ls --filter label=ultrafuzz.run=RUN_ID
 docker rm ultrafuzz-RUN_ID          # The container, with its copy of the key.
+docker ps -aq --filter label=ultrafuzz.reader=RUN_ID | xargs -r docker rm   # Reader containers of the run, if any.
 docker volume rm ultrafuzz-RUN_ID   # The outputs of the run in Docker. Collect first.
 ```
 
-Remove the container before the volume. `docker rm` refuses a container that is still running. After a run has ended you can remove its container and keep its volume: `status`, `collect` and `recover` then read the volume through a short-lived container that is never started. This needs the worker image. The local files of a run are in `~/.ultrafuzz/runs/<run-id>/`.
+Remove the container before the volume. `docker rm` refuses a container that is still running. After a run has ended you can remove its container and keep its volume: `status`, `collect` and `recover` then read the volume through a short-lived container that is never started. This needs the worker image. Such a reader container is named `ultrafuzz-reader-<run-id>-<random>` and carries the label `ultrafuzz.reader=<run-id>`, not `ultrafuzz.run`. The command removes it when it ends. A command that is stopped with Ctrl-C or killed can leave one behind, and it then keeps the volume in use: remove it before the volume. The local files of a run are in `~/.ultrafuzz/runs/<run-id>/`.
 
 A custom image must provide `sh`, `mkdir`, `cp`, `touch`, `sync`, a GNU-style `timeout`, `bun` and the harness. The container is created with `--init`, so the Docker host must provide `docker-init`.
 
@@ -363,7 +371,7 @@ bun dist/cli.js wait RUN_ID
 
 **What a run uses.** Each run has one worker sandbox and one Modal Volume. Both are named with the run ID. The Volume is mounted at `/run-data`. The sandbox continues when the command line exits. Short helper sandboxes (`debian:bookworm-slim`, 0.25 CPU, 256 MiB, 30 minutes at most) upload the run inputs at launch and read the Volume for `collect`, for `recover`, and for `status` and `wait` after the worker ended. `status` and `wait` also start one when a launch has no sandbox yet (once a minute at most) and when Modal does not know the sandbox of a run.
 
-**What stays on Modal.** One Volume for each run, the app, and the image. Ultrafuzz does not delete them. The one exception is a launch that failed before its worker sandbox started: its Volume is deleted. The Volume is kept when the request for the worker sandbox ended with a connection error, because Modal can have accepted it. Delete such a Volume by hand when no sandbox with the run ID exists.
+**What stays on Modal.** One Volume for each run, the app, and the image. Ultrafuzz does not delete them. The one exception is a launch that failed before its worker sandbox started: its Volume is deleted, and the run is recorded as failed with nothing to collect. The Volume is kept when the request for the worker sandbox ended with a connection error, because Modal can have accepted it. Delete such a Volume by hand when no sandbox with the run ID exists.
 
 **The Volume is sensitive.** The OpenRouter key enters the sandbox only as a Modal secret, and Ultrafuzz redacts it from the collected outputs. The Volume also holds the harness state (its home directory and its session database) and the workspace. These are not redacted. The harness and its tools have the key in their environment, so a file there can contain it. Delete the Volume after you collected the run.
 
@@ -398,7 +406,7 @@ If the harness exits without a nonempty `report.md`, Ultrafuzz sends one continu
 
 `cancel` asks the worker to stop. The worker then has five minutes: it stops the optional workspace export after 150 seconds, writes its record, and ends itself when the five minutes are over. A worker that is still alive after that is killed. On Docker the Docker daemon does this. On Modal a timer in the sandbox does this, and the next `status` or `wait` stops a sandbox that still runs. Each executor also stops a worker that runs past its deadline.
 
-`status: succeeded` means that a nonempty report exists. `end` and `exit_code` describe the execution separately, so a cancelled run can still have a report. A run with missing usage data can still succeed.
+`status: succeeded` means that a nonempty report exists. `end` and `exit_code` describe the execution separately, so a cancelled run can still have a report. After a continuation they describe the second harness call; `continuation.initial_end` and `continuation.initial_exit_code` keep the outcome of the first one. A run with missing usage data can still succeed.
 
 The OpenCode task guard is a temporary workaround for empty or truncated subagent results. It continues the affected subagent at most two times and then reports a failure. See [upstream issue 52378](https://github.com/anomalyco/opencode/issues/52378) and [upstream issue 59051](https://github.com/anomalyco/opencode/issues/59051).
 
@@ -424,7 +432,13 @@ raw/workspace/    when the run wrote them
 
 The package holds text files only. Text over 10 MiB is compressed with gzip. The limits are 50 MiB for one file and 200 MiB for one run. Optional workspace output is removed first. Fuzzing corpus, build and cache directories and package environments (for example `out`, `cache`, `.venv`) are always left out: each is one entry with a file count. Omissions are recorded in the run record; a very long list is cut, with a count of the rest. If the report, a transcript, or session or profile evidence does not fit, collection fails. The original outputs stay in the run's volume.
 
-Redaction replaces the known secret values and some credential patterns that it can identify, such as valid BIP39 mnemonics, labelled private keys and JWTs. Common development mnemonics and the default Anvil keys are kept. This is not a general protection against data leaks.
+The rule for build and cache directories and package environments holds for the workspace export only. A directory with such a name that the agent made in the output directory itself is packaged like other output, within the size limits. A fuzzing corpus is left out in both places; in the output directory it gives one entry for each file.
+
+On Modal, an output file whose name has a backslash or a control character is left out, and the run record lists it. If it is the report or a transcript, collection fails. On Docker such a file is collected with its name.
+
+If one file of the workspace cannot be copied, the worker copies the others and the run record says that the export is incomplete.
+
+Redaction replaces the known secret values and some credential patterns that it can identify, such as valid BIP39 mnemonics, labelled private keys and JWTs. The known secret values are the key of the run and, on the host, the value of each environment variable with `TOKEN`, `KEY`, `PASSWORD` or `SECRET` in its name. A value of fewer than 8 characters is not used: such a value, for example `1` or `false`, is an ordinary word, and its replacement would change the report. So a host secret that is shorter than 8 characters is not replaced. Common development mnemonics and the default Anvil keys are kept. This is not a general protection against data leaks.
 
 ## Optional GitHub publication
 
@@ -432,13 +446,13 @@ Publication is off by default. A run without it needs no GitHub setup. Publicati
 
 To turn it on:
 
-1. Authenticate the GitHub CLI on the host with `gh auth login`.
+1. Authenticate the GitHub CLI on the host with `gh auth login`, or set `GH_TOKEN`. Git gets its credentials for `github.com` from the GitHub CLI and never asks at the terminal.
 2. Set `results_repository = "owner/name"` under the repository in `ultrafuzz.toml`. The repository must be private and must have a default branch.
 3. Launch with `--publish`, or tick the checkbox in the dashboard.
 
 `--publish` without a results repository is refused before launch. Publication is decided at launch. There is no command that publishes a run that was launched without it.
 
-A published run has the branch `ultrafuzz/<run-id>` and one pull request. The result package is copied to `attempts/<label>/runs/<run-id>/`. Publication replaces only the files that it wrote before, keeps files that other tools added, and never force-pushes. A failed publication does not start a new download or a new audit. The next `status`, `wait` or `collect` tries it again from the local package.
+A published run has the branch `ultrafuzz/<run-id>` and one pull request. The result package is copied to `attempts/<label>/runs/<run-id>/`. Publication replaces only the files that it wrote before, keeps files that other tools added, and never force-pushes. It checks out only the directory of the run, and it adds each file of the package also when an ignore rule of the results repository matches it. A failed publication does not start a new download or a new audit. The next `status`, `wait` or `collect` tries it again from the local package.
 
 ## Not included in the experimental release
 
@@ -481,6 +495,6 @@ bun run build
 bun run test:modal
 ```
 
-Two GitHub workflows run in CI. `Check` runs `bun run check` and, in a second job, the Docker integration test. `Worker image` builds the real worker image with `docker build` and runs each pinned tool in it. As the unprivileged user of the harness, it also compiles with each Vyper version, builds a Python environment with `uv` and selects a Solidity compiler. It runs on a pull request that changes the Dockerfile, and on request. No workflow runs the Modal integration test.
+Two GitHub workflows run in CI. `Check` runs `bun run check` and then the built command line (`--version`, `init` and `profiles`, all offline). In a second job it runs the Docker integration test. `Worker image` builds the real worker image with `docker build` and runs each pinned tool in it. As the unprivileged user of the harness, it also compiles with each Vyper version, builds a Python environment with `uv` and selects a Solidity compiler. It runs on a pull request that changes the Dockerfile, and on request. No workflow runs the Modal integration test.
 
 These tests do not replace live runs. The acceptance list in section 12 of the specification is still open.

@@ -126,6 +126,28 @@ describe("profiles", () => {
     await expect(stageProfile(profile, join(root, "first"))).rejects.toThrow("not empty");
   });
 
+  test("files that tools leave in a profile are not part of it, and a file that is not text fails the launch, not the collection", async () => {
+    const { root, directory } = await fixture();
+    await mkdir(join(directory, "scripts"));
+    await writeFile(join(directory, "scripts", "render.py"), "print('ok')\n");
+    const profile = await loadProfile("test/profile", "opencode");
+    const clean = await stageProfile(profile, join(root, "clean"));
+    // Python bytecode and the folder file of macOS: not listed, not hashed, not staged.
+    await mkdir(join(directory, "scripts", "__pycache__"));
+    await writeFile(join(directory, "scripts", "__pycache__", "render.cpython-311.pyc"), Buffer.from([0x6f, 0x0d, 0x0d, 0x0a, 0, 0, 0, 0]));
+    await writeFile(join(directory, "scripts", "stray.pyc"), Buffer.from([0, 1, 2]));
+    await writeFile(join(directory, ".DS_Store"), Buffer.from([0, 0, 0, 1, 0x42, 0x75, 0x64, 0x31]));
+    await loadProfile("test/profile", "opencode");
+    expect(await stageProfile(profile, join(root, "littered"))).toBe(clean);
+    expect((await readdir(join(root, "littered"), { recursive: true })).sort()).toEqual(["profile.json", "prompt.mdx", "scripts", "scripts/render.py"]);
+    expect((await listProfiles()).map(found => found.name)).toEqual(["test/profile"]);
+    // Any other file that is not UTF-8 text would fail the package of every run after the audit. The launch fails and names it.
+    await writeFile(join(directory, "scripts", "table.bin"), Buffer.from([0, 255, 1]));
+    await expect(stageProfile(profile, join(root, "binary"))).rejects.toThrow("Profile test/profile has a file that is not UTF-8 text: scripts/table.bin.");
+    await writeFile(join(directory, "scripts", "table.bin"), Buffer.from([0xff, 0xfe, 0x41]));
+    await expect(stageProfile(profile, join(root, "latin"))).rejects.toThrow("not UTF-8 text: scripts/table.bin");
+  });
+
   test("requires properties and preserves provenance without executing MDX", async () => {
     await fixture({ requires_properties: true });
     const profile = await loadProfile("test/profile");

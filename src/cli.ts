@@ -157,7 +157,7 @@ export async function main(args = process.argv.slice(2), executors?: ExecutorSou
     if (!commands.includes(command!)) throw new Error(`Unknown command ${command}. Run ultrafuzz --help.`);
     if (extra.length && command !== "watch") throw new Error("Unexpected positional arguments.");
     const flags: Record<string, string[]> = {
-      launch: ["repository", "label", "profile", "harness", "model", "effort", "properties", "key-env", "timeout", "input", "inputs", "executor", "publish"],
+      launch: ["repository", "label", "profile", "harness", "model", "effort", "properties", "key-env", "timeout", "input", "inputs", "executor", "revision", "publish"],
       collect: ["force"], recover: ["executor"], viewer: ["port"], watch: ["label", "interval", "once"],
     };
     for (const key of Object.keys(values)) {

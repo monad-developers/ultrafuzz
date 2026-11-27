@@ -6,7 +6,7 @@ import { dirname, join, resolve, relative } from "node:path";
 import { x as extractTar } from "tar";
 import { stringify as yaml } from "yaml";
 import { redactDirectory, redactText } from "./artifacts";
-import { captureCommand, copyDirectory, exportSessions, files, harnessCommand, harnessUser, isObject, prepareHarness, profileDigest, sessionFromEvent, usageFromEvents, type HarnessContext } from "./harnesses";
+import { captureCommand, copyDirectory, exportSessions, files, harnessCommand, harnessUser, isObject, prepareHarness, sessionFromEvent, usageFromEvents, type HarnessContext } from "./harnesses";
 import type { RunRecord, WorkerJob } from "./types";
 
 const minute = 60_000;
@@ -186,12 +186,21 @@ export async function runInvocation(context: HarnessContext, prompt: string, cut
   });
 }
 
-/** Every regular file below `root`, without Git metadata and installed packages. It is lazy, so a caller can stop at a time limit. */
-function* workspaceFiles(root: string): Generator<string> {
-  for (const name of readdirSync(root)) {
+/**
+ * Every regular file below `root`, without Git metadata and installed packages. It is lazy, so a caller can stop at a time limit.
+ * With `skipped`, a directory or an entry that cannot be read is counted there and the walk continues: a tool that
+ * still runs can remove a file between the listing and the look at it.
+ */
+function* workspaceFiles(root: string, skipped?: { count: number; first?: string }): Generator<string> {
+  const fail = (error: unknown) => { if (!skipped) throw error; skipped.count++; skipped.first ??= String(error); };
+  let names: string[] = [];
+  try { names = readdirSync(root); } catch (error) { fail(error); }
+  for (const name of names) {
     if (name === ".git" || name === "node_modules") continue;
-    const path = join(root, name), stat = lstatSync(path);
-    if (stat.isDirectory()) yield* workspaceFiles(path);
+    const path = join(root, name);
+    let stat;
+    try { stat = lstatSync(path); } catch (error) { fail(error); continue; }
+    if (stat.isDirectory()) yield* workspaceFiles(path, skipped);
     else if (stat.isFile()) yield path;
   }
 }
@@ -262,10 +271,12 @@ export async function runWorker(root: string, limits: Partial<WorkerLimits> = {}
     let result = await runInvocation(context, prompt, plan.initial, { onRedaction, cancelled: () => cancelled, onChild: (child) => { active = child; }, onEvent });
     record.exit_code = result.code;
     record.end = cancelled ? "cancelled" : result.timedOut ? "timeout" : result.code === 0 ? "completed" : "error";
+    // The continuation block keeps the outcome of this first call: `end` and `exit_code` then describe the second call.
+    const initial = { initial_end: result.timedOut ? "timeout" as const : result.code === 0 ? "completed" as const : "error" as const, initial_exit_code: result.code };
     const usableMinutes = (plan.continuation - Date.now()) / minute;
     if (!nonemptyReport(report) && record.session_id && !cancelled && usableMinutes >= 5) {
       const message = `Continue. Your run stopped before report.md was written. About ${Math.floor(usableMinutes)} minutes remain. Subagents that were running when you stopped may have been stopped; rerun any whose results you do not have. Finish the task as originally instructed and write report.md before time runs out.`;
-      record.continuation = { trigger: "missing-report", sent_at: now(), minutes_left: Math.floor(usableMinutes), exit_code: null, report_after: false };
+      record.continuation = { trigger: "missing-report", sent_at: now(), minutes_left: Math.floor(usableMinutes), exit_code: null, report_after: false, ...initial };
       writeFileSync(join(raw, "continuation.txt"), message);
       save();
       result = await runInvocation(context, message, plan.continuation, { onRedaction, sessionId: record.session_id, cancelled: () => cancelled, onChild: (child) => { active = child; }, onEvent });
@@ -291,20 +302,28 @@ export async function runWorker(root: string, limits: Partial<WorkerLimits> = {}
       try { record.usage = await exportSessions(context, Math.min(exportEnd(), Date.now() + (cancelled ? 4 : 8) * minute), (path, reason) => record.omitted.push({ path, reason })) ?? record.usage; }
       catch (error) { log(`Session export incomplete; native state retained in the run store: ${String(error)}`); record.omitted.push({ path: "raw/sessions", reason: "Native export failed; state retained in the run store" }); }
       if (record.session_id && ![...files(join(raw, "sessions"))].length) record.omitted.push({ path: "raw/sessions", reason: "Native session files unavailable; transcript retained" });
-      const kept = new Map<string, number>(), stopAt = exportEnd();
-      let stopped = false;
+      const kept = new Map<string, number>(), stopAt = exportEnd(), failed = { count: 0, first: undefined as string | undefined };
+      let stopped = false, agentsFailed = false;
       try {
-        for (const path of workspaceFiles(job.workspace)) {
+        for (const path of workspaceFiles(job.workspace, failed)) {
           if (Date.now() >= stopAt) { stopped = true; break; }
-          const name = relative(job.workspace, path), parts = name.split("/"), index = parts.findIndex((part) => generated.has(part));
-          // A file that the source did not have is not read to see that it is new: a corpus can hold very many files.
-          if (baseline.has(name) && baseline.get(name) === digest(path)) continue;
-          if (index >= 0) { const directory = parts.slice(0, index + 1).join("/"); kept.set(directory, (kept.get(directory) ?? 0) + 1); continue; }
-          const destination = join(raw, "workspace", name);
-          mkdirSync(dirname(destination), { recursive: true }); cpSync(path, destination);
+          // One file that cannot be read or copied does not end the export of the others.
+          try {
+            const name = relative(job.workspace, path), parts = name.split("/"), index = parts.findIndex((part) => generated.has(part));
+            // A file that the source did not have is not read to see that it is new: a corpus can hold very many files.
+            if (baseline.has(name) && baseline.get(name) === digest(path)) continue;
+            if (index >= 0) { const directory = parts.slice(0, index + 1).join("/"); kept.set(directory, (kept.get(directory) ?? 0) + 1); continue; }
+            const destination = join(raw, "workspace", name);
+            mkdirSync(dirname(destination), { recursive: true }); cpSync(path, destination);
+          } catch (error) { failed.count++; failed.first ??= String(error); }
         }
-        if (!stopped) copyDirectory(join(job.workspace, "agents"), join(raw, "agents"));
-      } catch (error) { log(`Workspace export incomplete; source remains in the run store: ${String(error)}`); }
+      } catch (error) { failed.count++; failed.first ??= String(error); }
+      if (!stopped) try { copyDirectory(join(job.workspace, "agents"), join(raw, "agents")); }
+      catch (error) { agentsFailed = true; log(`Export of the agents directory incomplete; it remains in the run store: ${String(error)}`); }
+      if (failed.count) log(`Workspace export incomplete; source remains in the run store: ${failed.count} ${failed.count === 1 ? "entry" : "entries"} could not be copied. First error: ${failed.first}`);
+      // One entry for all failures, so the list stays short.
+      if (failed.count && !stopped) record.omitted.push({ path: "raw/workspace", reason: `Export incomplete: ${failed.count} ${failed.count === 1 ? "entry" : "entries"} could not be copied; the workspace stays in the run store` });
+      if (agentsFailed && !stopped) record.omitted.push({ path: "raw/agents", reason: "Export incomplete; the workspace stays in the run store" });
       for (const [directory, count] of kept) record.omitted.push({ path: `raw/workspace/${directory}`, reason: `Generated cache/corpus retained in the run store (${count} new or changed ${count === 1 ? "file" : "files"})` });
       if (stopped) {
         log("Workspace export stopped at the time limit.");
@@ -317,10 +336,12 @@ export async function runWorker(root: string, limits: Partial<WorkerLimits> = {}
     if (!nonemptyReport(report) && !record.error) record.error = "report.md is missing or empty";
     try {
       // The redaction gets a short time of its own after the export. The harness logs and session exports are redacted as they are written.
+      // The pass stops itself before the next file when the time is over, so it does not change files during the last syncs.
       const stopAt = exportEnd() + grace / 10;
-      const redactions = Date.now() < stopAt ? await before(stopAt, redactDirectory(job.output_dir, [key])) : null;
+      let cut = false;
+      const redactions = Date.now() < stopAt ? await before(stopAt, redactDirectory(job.output_dir, [key], () => cut ||= Date.now() >= stopAt)) : null;
       if (redactions !== null) record.redactions = (record.redactions ?? 0) + redactions;
-      else {
+      if (redactions === null || cut) {
         log("Output redaction stopped at the time limit.");
         record.omitted.push({ path: ".", reason: "Worker redaction pass stopped at the time limit; the collector redacts again before it packages" });
       }
@@ -329,7 +350,7 @@ export async function runWorker(root: string, limits: Partial<WorkerLimits> = {}
       record.error = `Output redaction failed: ${String(error)}`;
       record.collection = { ...record.collection, state: "failed", error: record.error };
     }
-    if (existsSync(join(raw, "profile"))) record.profile.sha256 = profileDigest(join(raw, "profile"));
+    // The profile digest in the record is the one that the host made of the profile files at launch. It is not replaced here.
     const sanitized = JSON.parse(redactText(JSON.stringify(record), [key]).text) as RunRecord;
     Object.assign(record, sanitized);
     boundRecord(record);

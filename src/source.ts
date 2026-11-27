@@ -3,7 +3,7 @@ import { createReadStream } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm, symlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { create as createTar } from "tar";
-import { redactText } from "./artifacts";
+import { environmentSecrets, redactText } from "./artifacts";
 import type { InputRecord } from "./types";
 
 const excluded = new Set([".git", ".git-credentials", ".netrc", ".ssh", ".aws", ".env", ".npmrc", ".pypirc", ".cache", ".npm", "node_modules", "__pycache__", ".pytest_cache"]);
@@ -34,8 +34,7 @@ async function git(args: string[], cwd: string, input?: string): Promise<string>
   ], { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_LFS_SKIP_SMUDGE: "1" }, stdin: input === undefined ? "ignore" : new Blob([input]), stdout: "pipe", stderr: "pipe" });
   const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
   if (code !== 0) {
-    const secrets = Object.entries(process.env).filter(([key, value]) => value && /TOKEN|KEY|PASSWORD|SECRET/i.test(key)).map(([, value]) => value!);
-    throw new Error(`Git ${args[0]} failed: ${redactText(stderr || stdout, secrets).text.slice(-2000)}`);
+    throw new Error(`Git ${args[0]} failed: ${redactText(stderr || stdout, environmentSecrets()).text.slice(-2000)}`);
   }
   return stdout;
 }
@@ -115,7 +114,9 @@ async function prepareRepository(repository: string, revision: string | undefine
   const temporary = await mkdtemp(join(destination, ".ultrafuzz-source-"));
   const checkout = join(temporary, "checkout"), clean = join(temporary, "clean");
   try {
-    await git(["clone", "--recursive", "--", remote, checkout], destination);
+    // A pinned revision is checked out into an empty tree, and only its own submodules are fetched. A clone of the
+    // default branch first would leave the submodules of that branch in the snapshot, and would need each of them.
+    await git(["clone", ...(revision ? ["--no-checkout"] : ["--recursive"]), "--", remote, checkout], destination);
     if (revision) {
       await git(["fetch", "--no-tags", "origin", revision], checkout);
       await git(["checkout", "--detach", "FETCH_HEAD"], checkout);

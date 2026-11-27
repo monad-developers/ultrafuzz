@@ -6,7 +6,7 @@ import { Header, c as createTar, t as listTar, x as extractTar, type HeaderData 
 import { initWorkspace } from "../src/config";
 import { IMAGE_LABEL, READER_LABEL, RUN_LABEL, SCHEMA_LABEL, DockerExecutor, commandRunner, createArguments, unpack, type DockerOptions, type DockerResult, type DockerRunner } from "../src/docker";
 import { createEngine, settled } from "../src/engine";
-import { WORKER_COMMAND, loadExecutor } from "../src/executor";
+import { LaunchNotStarted, WORKER_COMMAND, loadExecutor } from "../src/executor";
 import { readRun } from "../src/store";
 import type { Config, RunRecord, WorkerJob } from "../src/types";
 import { runWorker } from "../src/worker";
@@ -344,17 +344,42 @@ describe("launch", () => {
   test("a failed launch removes the container that never started, and its volume", async () => {
     const { docker, executor } = setup(), run = record();
     docker.start = { code: 125, stderr: "Error response from daemon: failed to create task" }; docker.started = "created";
-    await expect(executor.launch(run, staging(run), key)).rejects.toThrow("docker start failed (exit 125): Error response from daemon: failed to create task");
+    const failure = await executor.launch(run, staging(run), key).then(() => new Error("the launch did not fail"), error => error as Error);
+    expect(failure.message).toBe("docker start failed (exit 125): Error response from daemon: failed to create task");
+    // Docker confirmed both removals, so the error says that nothing of the run is left.
+    expect(failure).toBeInstanceOf(LaunchNotStarted);
     expect(docker.verbs().slice(-3)).toEqual(["container inspect", "rm", "volume rm"]);
     expect(docker.find("rm")[0]!.args).toEqual(["rm", `ultrafuzz-${id}`]);
     expect(docker.containers.size + docker.volumes.size).toBe(0);
+
+    // A failure before anything was created says the same. So does a volume that Docker never created.
+    const small = setup();
+    small.docker.info = { stdout: "1 16777216000 linux\n" };
+    expect(await small.executor.launch(run, staging(run), key).catch(error => error)).toBeInstanceOf(LaunchNotStarted);
+    const refused = setup();
+    refused.docker.failing.set("volume create", { code: 1, stderr: "Error response from daemon: no space left on device" });
+    const early = await refused.executor.launch(run, staging(run), key).then(() => new Error("the launch did not fail"), error => error as Error);
+    expect(early).toBeInstanceOf(LaunchNotStarted);
+    expect(early.message).toContain("docker volume create failed (exit 1)");
+
+    // A removal that Docker did not confirm proves nothing: the error stays a plain one, and the core keeps the run open.
+    const stuck = setup();
+    stuck.docker.start = { code: 125, stderr: "Error response from daemon: failed to create task" }; stuck.docker.started = "created";
+    stuck.docker.failing.set("volume rm", { code: 1, stderr: "Error response from daemon: volume is in use" });
+    const unsure = await stuck.executor.launch(run, staging(run), key).then(() => new Error("the launch did not fail"), error => error as Error);
+    expect(unsure.message).toContain("docker start failed (exit 125)");
+    expect(unsure).not.toBeInstanceOf(LaunchNotStarted);
+    expect(stuck.docker.volumes.has(`ultrafuzz-${id}`)).toBe(true);
   });
 
   test("a failed launch keeps a container that ran", async () => {
     const { docker, executor } = setup(), run = record();
     // The start reached the daemon although the client reported a failure.
     docker.start = { code: 1, stderr: "connection reset" }; docker.started = "exited";
-    await expect(executor.launch(run, staging(run), key)).rejects.toThrow("docker start failed (exit 1): connection reset");
+    const failure = await executor.launch(run, staging(run), key).then(() => new Error("the launch did not fail"), error => error as Error);
+    expect(failure.message).toBe("docker start failed (exit 1): connection reset");
+    // The run can have started, so this is not the error of a launch that left nothing.
+    expect(failure).not.toBeInstanceOf(LaunchNotStarted);
     expect(docker.verbs().at(-1)).toBe("container inspect");
     expect(docker.containers.has(`ultrafuzz-${id}`)).toBe(true);
     expect(docker.volumes.has(`ultrafuzz-${id}`)).toBe(true);
@@ -456,10 +481,36 @@ describe("observe", () => {
     await expect(executor.download(run, join(scratch(), "out"))).rejects.toThrow(`Docker volume ultrafuzz-${id} does not carry the label of run ${id}`);
     docker.finished(run, record({ state: "finished" }, other));
     await expect(executor.observe(run)).rejects.toThrow("Completion record belongs to another run");
-    docker.store.set(`ultrafuzz-${id}:/run-data/complete.json`, fileArchive("complete.json", { schema: "ultrafuzz.run.v1" }));
-    await expect(executor.observe(run)).rejects.toThrow("Invalid v0.2 run record");
-    docker.store.set(`ultrafuzz-${id}:/run-data/complete.json`, archive(entry({ path: "complete.json", type: "SymbolicLink", linkpath: "/etc/hostname" })));
-    await expect(executor.observe(run)).rejects.toThrow("Invalid stored run record");
+  });
+
+  test("a damaged or too large completion record ends the run as a run without one, as on Modal", async () => {
+    const plants: Array<[Buffer, string]> = [
+      [fileArchive("complete.json", "{not json"), ""],
+      [fileArchive("complete.json", { schema: "ultrafuzz.run.v1" }), "Invalid v0.2 run record"],
+      [archive(entry({ path: "complete.json", type: "SymbolicLink", linkpath: "/etc/hostname" })), "Invalid stored run record"],
+      // One byte more than the largest record that is read.
+      [archive(entry({ path: "complete.json" }, " ".repeat(16 * 1024 * 1024 + 1))), "Invalid stored run record"],
+    ];
+    for (const [bytes, reason] of plants) {
+      const { docker, executor } = setup(), run = record();
+      docker.finished(run, null, undefined, 1);
+      docker.store.set(`ultrafuzz-${id}:/run-data/complete.json`, bytes);
+      // The engine can then end the run and collect its outputs.
+      const printed = await notices(async () => { expect(await executor.observe(run)).toEqual({ code: 1, runtime_id: containerId, complete: null }); });
+      expect(printed).toStartWith(`The completion record of run ${id} cannot be used (${reason}`);
+      expect(printed).toEndWith("The run is handled as a run without one.\n");
+      // The same through a reader container, after the container of the run was removed.
+      docker.containers.clear();
+      expect(await notices(async () => { expect((await executor.observe(run)).complete).toBeNull(); })).toContain("cannot be used");
+      expect(docker.containers.size).toBe(0);
+      // The copy of a record file has a size limit.
+      expect(docker.find("cp").every(call => call.options?.limit === 17 * 1024 * 1024)).toBe(true);
+    }
+    // A copy that was stopped at the limit is a record that is too large. Any other failed copy stays an error.
+    const { docker, executor } = setup(), run = record();
+    docker.finished(run, null, undefined, 0);
+    docker.failing.set("cp", { code: 1, overflow: true });
+    expect(await notices(async () => { expect((await executor.observe(run)).complete).toBeNull(); })).toContain("cannot be used (Invalid stored run record)");
   });
 });
 
@@ -566,14 +617,18 @@ describe("cancel", () => {
     expect(docker.verbs()).not.toContain("volume rm");
   });
 
-  test("does nothing for a container that is gone, ended, or not started", async () => {
+  test("does nothing for a container that is gone, ended, or not started, and says when Docker has no container", async () => {
     const { docker, executor } = setup(), run = record();
-    await executor.cancel(run);
+    // No container: Docker knows no runtime of the run. The core decides what that means.
+    expect(await executor.cancel(run)).toBe(false);
     for (const status of ["exited", "dead", "created"]) {
       docker.containers.set(`ultrafuzz-${id}`, { id: containerId, status, exit: 0, run: id });
-      await executor.cancel(run);
+      // The container is known. Nothing is left to stop.
+      expect(await executor.cancel(run)).toBe(true);
     }
     expect(docker.verbs().every(verb => verb === "container inspect")).toBe(true);
+    docker.containers.get(`ultrafuzz-${id}`)!.status = "running";
+    expect(await executor.cancel(run)).toBe(true);
   });
 });
 
@@ -633,6 +688,16 @@ describe("the real command runner", () => {
     // Without an input file the command gets no stdin at all, so it cannot wait for the terminal.
     expect(await client("cat")([])).toEqual({ code: 0, stdout: "", stderr: "" });
   });
+  test("an output file with a limit is not written past it, and the command is stopped", async () => {
+    const directory = scratch(), input = join(directory, "in.bin"), output = join(directory, "out.bin");
+    writeFileSync(input, "x".repeat(300_000));
+    expect(await client("cat")([], { input, output, limit: 300_000 })).toEqual({ code: 0, stdout: "", stderr: "" });
+    expect(lstatSync(output).size).toBe(300_000);
+    // The command would print without end. It is stopped, and the file stays at or below the limit.
+    const endless = await client("exec yes")([], { output, limit: 100_000 });
+    expect(endless).toMatchObject({ code: 1, overflow: true });
+    expect(lstatSync(output).size).toBeLessThanOrEqual(100_000);
+  });
   test("a detached command is not awaited", async () => {
     const marker = join(scratch(), "marker"), started = Date.now();
     expect(await client(`sleep 1; echo done > "${marker}"`)([], { detached: true })).toEqual({ code: 0, stdout: "", stderr: "" });
@@ -680,6 +745,41 @@ describe("the engine on the Docker adapter", () => {
       expect(settled(later)).toBe(true);
     }
     expect(docker.verbs()).toEqual(["info"]);
+  });
+
+  test("a container that Docker cannot start leaves a settled run at once, and a watch does not pick it up", async () => {
+    const { home, docker, engine } = await workspace('[docker]\ncpu=2\nmemory_mib=2048\ntimeout_seconds=3600\nimage="example/worker:1"\n');
+    docker.start = { code: 125, stderr: "Error response from daemon: failed to create task" }; docker.started = "created";
+    const error = await engine.launch({ repository: "example", label: "no-start" }).then(() => new Error("the launch did not fail"), failure => failure as Error);
+    expect(error.message).toContain("docker start failed (exit 125)");
+    expect(error.message).not.toContain("reconcile");
+    const run = await readRun(home, error.message.match(/Run (\S+):/)![1]!);
+    expect(run).toMatchObject({ state: "finished", status: "failed", end: "error", collection: { state: "collected", path: null, report: null } });
+    expect(settled(run)).toBe(true);
+    expect(docker.containers.size + docker.volumes.size).toBe(0);
+    // Nothing is asked of Docker later, and a watch without IDs has nothing to do.
+    const calls = docker.calls.length;
+    expect(await engine.status(run.id)).toEqual(run);
+    expect(await engine.watch({ once: true })).toEqual([]);
+    expect(docker.calls.length).toBe(calls);
+  });
+
+  test("a cancel that reaches another Docker host stops nothing and says so; the run is not ended", async () => {
+    const { home, docker, engine } = await workspace('[docker]\ncpu=2\nmemory_mib=2048\ntimeout_seconds=3600\nimage="example/worker:1"\n');
+    const run = await engine.launch({ repository: "example", label: "elsewhere" });
+    // Another DOCKER_HOST: that daemon has neither the container nor the volume.
+    const real = { containers: new Map(docker.containers), volumes: new Map(docker.volumes) };
+    docker.containers.clear(); docker.volumes.clear();
+    await expect(engine.cancel(run.id)).rejects.toThrow("the docker executor does not know this run, so nothing was stopped");
+    expect(docker.verbs()).not.toContain("stop");
+    expect(await readRun(home, run.id)).toMatchObject({ state: "running", end: null });
+    // The next status keeps the run and writes the warning of the 30-minute rule.
+    expect(await notices(async () => { expect(await engine.status(run.id)).toMatchObject({ state: "running", end: null }); })).toContain("does not know this run");
+    // With the right host the same command stops the container.
+    for (const [name, container] of real.containers) docker.containers.set(name, container);
+    for (const [name, owner] of real.volumes) docker.volumes.set(name, owner);
+    expect(await engine.cancel(run.id)).toMatchObject({ state: "running", end: "cancelled" });
+    expect(docker.verbs()).toContain("stop");
   });
 
   test("launch, observe, collect and recover go through docker commands only", async () => {

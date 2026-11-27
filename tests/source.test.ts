@@ -72,6 +72,8 @@ test("recursive submodules are included and dependency revisions resolve indepen
     const pinned = await prepareSource(repo, undefined, join(root, "pinned"), old);
     expect(pinned.commit).toBe(old);
     expect(await readFile(join(root, "pinned/workspace/version.txt"), "utf8")).toBe("old\n");
+    // The clone of a pinned revision fetches no submodule. The submodules of the pinned commit come from the update after the checkout.
+    expect(await readFile(join(root, "pinned/workspace/lib/child/library.txt"), "utf8")).toBe("library\n");
     await expect(prepareSource(repo, undefined, join(root, "bad"), "--upload-pack=x")).rejects.toThrow("Invalid repository revision");
     expect(await readFile(join(dependency.checkout, "version.txt"), "utf8")).toBe("old\n");
     expect((await readdir(join(dependency.checkout, "lib/child"))).includes(".git")).toBe(false);
@@ -136,5 +138,38 @@ const p=Bun.spawn([${JSON.stringify(realGit)},...args],{stdin:"inherit",stdout:"
     process.env.TEST_LFS_MODE = "materialized";
     await prepareSource(repo, undefined, join(root, "materialized"));
     expect(await readFile(join(root, "materialized/workspace/payload.txt"), "utf8")).toBe(payload);
+  });
+});
+
+test("a pinned revision is checked out by itself: later submodules of the default branch are not in the snapshot and are not needed", async () => {
+  const root = await directory(), added = await repository(root, "added"), vendored = await repository(root, "vendored"), repo = await repository(root);
+  await writeFile(join(added, "library.txt"), "added later\n"); await commit(added);
+  await writeFile(join(vendored, "library.txt"), "as a submodule\n"); await commit(vendored);
+  // The pinned commit has a plain directory lib/dep and no submodule.
+  await mkdir(join(repo, "lib/dep"), { recursive: true });
+  await writeFile(join(repo, "lib/dep/library.txt"), "vendored copy\n");
+  await writeFile(join(repo, "version.txt"), "old\n");
+  const pin = await commit(repo);
+  // The default branch then adds one submodule and turns the directory into another.
+  await git(["submodule", "add", added, "lib/new"], repo);
+  await git(["rm", "-r", "-q", "lib/dep"], repo);
+  await git(["submodule", "add", vendored, "lib/dep"], repo);
+  await writeFile(join(repo, "version.txt"), "new\n");
+  const head = await commit(repo, "Submodules");
+  await withEnvironment({ GIT_ALLOW_PROTOCOL: "file" }, async () => {
+    const pinned = await prepareSource(repo, undefined, join(root, "pinned"), pin);
+    expect(pinned.commit).toBe(pin);
+    // The snapshot is the tree of the recorded commit, and nothing else.
+    expect((await readdir(join(root, "pinned/workspace"), { recursive: true })).sort()).toEqual(["lib", "lib/dep", "lib/dep/library.txt", "version.txt"]);
+    expect(await readFile(join(root, "pinned/workspace/lib/dep/library.txt"), "utf8")).toBe("vendored copy\n");
+    // The default branch still gives its own submodules.
+    const latest = await prepareSource(repo, undefined, join(root, "latest"));
+    expect(latest.commit).toBe(head);
+    expect(await readFile(join(root, "latest/workspace/lib/new/library.txt"), "utf8")).toBe("added later\n");
+    expect(await readFile(join(root, "latest/workspace/lib/dep/library.txt"), "utf8")).toBe("as a submodule\n");
+    // A submodule of the default branch that is gone does not stop a pinned launch that does not use it.
+    await rm(added, { recursive: true });
+    expect((await prepareSource(repo, undefined, join(root, "pinned-again"), pin)).commit).toBe(pin);
+    await expect(prepareSource(repo, undefined, join(root, "broken"))).rejects.toThrow("Git clone failed");
   });
 });

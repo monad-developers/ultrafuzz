@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, chown, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { validateMnemonic } from "@scure/bip39";
@@ -31,6 +31,23 @@ const anvilKeys = new Set([
   "2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6",
 ]);
 
+/**
+ * The shortest value of a host environment variable that is handled as a secret. A shorter value, such as "1" or
+ * "false", is an ordinary word: its replacement would change reports, transcripts and file names.
+ */
+export const MIN_ENVIRONMENT_SECRET = 8;
+/**
+ * The values of the host environment variables whose names say that they hold a credential. A key that a caller
+ * knows exactly, such as the key of a run, is passed to redactText directly and has no length limit.
+ */
+export function environmentSecrets(environment: Record<string, string | undefined> = process.env): string[] {
+  return Object.entries(environment)
+    .filter(([name, value]) => !!value && value.length >= MIN_ENVIRONMENT_SECRET && /TOKEN|KEY|PASSWORD|SECRET/i.test(name))
+    .map(([, value]) => value!);
+}
+/** The name of the file that a redaction pass writes next to a file before it replaces that file. */
+const REDACTION_TEMPORARY = /\.ultrafuzz-redact-\d+\.tmp$/;
+
 /** Positive matches only. Exact handled secrets take precedence over fixture allowlists. */
 export function redactText(text: string, secrets: string[] = []): { text: string; count: number } {
   let count = 0;
@@ -50,7 +67,9 @@ export function redactText(text: string, secrets: string[] = []): { text: string
   for (const pattern of [
     /\bsk-or-v1-[A-Za-z0-9_-]{32,}\b/g,
     /\bAIza[0-9A-Za-z_-]{35}\b/g,
-    /\b(?:ak|as)-[A-Za-z0-9_-]{20,}\b/g,
+    // A Modal token ID or secret. The body has letters and digits only, and no word or hyphen comes before the
+    // prefix: a slug such as "used-as-collateral-without-a-health-check" is ordinary text.
+    /(?<![A-Za-z0-9_-])(?:ak|as)-[A-Za-z0-9]{20,}(?![A-Za-z0-9_-])/g,
   ]) text = text.replace(pattern, () => { count++; return "[REDACTED]"; });
   text = text.replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, (token) => {
     try {
@@ -108,11 +127,17 @@ async function* entries(root: string, prefix = ""): AsyncGenerator<{ path: strin
   }
 }
 
-/** Redact worker output before its first copy to durable storage. Never follows links. */
-export async function redactDirectory(root: string, secrets: string[] = []): Promise<number> {
+/**
+ * Redact worker output before its first copy to durable storage. Never follows links.
+ * `stop` is asked before each file: when it returns true, the pass ends and the files that are left stay as they
+ * are. A file is replaced by a rename, so a process that ends during a write leaves the original file whole.
+ */
+export async function redactDirectory(root: string, secrets: string[] = [], stop: () => boolean = () => false): Promise<number> {
   let count = 0;
   for await (const entry of entries(root)) {
-    if (entry.kind !== "file") continue;
+    if (stop()) break;
+    // A file that an interrupted pass left behind is not an output.
+    if (entry.kind !== "file" || REDACTION_TEMPORARY.test(entry.path)) continue;
     const path = join(root, entry.path);
     let bytes = await readFile(path);
     const compressed = entry.path.endsWith(".gz");
@@ -124,8 +149,17 @@ export async function redactDirectory(root: string, secrets: string[] = []): Pro
     const result = redactText(bytes.toString(encoding), secrets);
     if (!result.count) continue;
     count += result.count;
-    const output = Buffer.from(result.text, encoding);
-    await writeFile(path, decodedGzip ? gzipSync(output) : output, { mode: 0o600 });
+    const output = Buffer.from(result.text, encoding), info = await lstat(path);
+    const temporary = `${path}.ultrafuzz-redact-${process.pid}.tmp`;
+    await rm(temporary, { force: true });
+    try {
+      // The exclusive flag never writes through an existing path, so a link at this name cannot redirect the write.
+      await writeFile(temporary, decodedGzip ? gzipSync(output) : output, { mode: 0o600, flag: "wx" });
+      // The new file keeps the owner and the mode of the old one. Only root can change the owner.
+      await chown(temporary, info.uid, info.gid).catch(() => undefined);
+      await chmod(temporary, info.mode & 0o7777);
+      await rename(temporary, path);
+    } catch (error) { await rm(temporary, { force: true }); throw error; }
   }
   return count;
 }
@@ -178,6 +212,7 @@ export async function prepareArtifacts(
   try {
     for await (const entry of entries(source)) {
       if (entry.path === "run.yml" || entry.path === "usage.yml") continue;
+      if (REDACTION_TEMPORARY.test(entry.path)) { omit(entry.path, "file of an interrupted redaction pass excluded"); continue; }
       const safeName = redactText(entry.path, secrets);
       redactions += safeName.count;
       const previousOmission = omitted.findIndex((item) => item.path === safeName.text);

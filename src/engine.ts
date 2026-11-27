@@ -5,14 +5,13 @@ import { loadConfig } from "./config";
 import { listRuns, readRun, updateRun, withRunOperation, writeRun } from "./store";
 import { loadProfile, renderPrompt, stageProfile } from "./profiles";
 import { prepareSource, prepareDependency, stageInputs } from "./source";
-import { prepareArtifacts, redactText } from "./artifacts";
+import { environmentSecrets as knownSecrets, prepareArtifacts, redactText } from "./artifacts";
 import { publishRun } from "./publish";
-import { RUN_ROOT, executorRecord, loadExecutor, type Executor, type ExecutorSource } from "./executor";
+import { LaunchNotStarted, RUN_ROOT, executorRecord, loadExecutor, type Executor, type ExecutorSource, type Observation } from "./executor";
 import { EXECUTORS, HARNESSES, VERSION, type ExecutorName, type LaunchOptions, type RunRecord, type WorkerJob } from "./types";
 
 const now = () => new Date().toISOString();
 const idPattern = /^\d{8}-\d{6}-[a-f0-9]{8}$/;
-const knownSecrets = () => Object.entries(process.env).filter(([key, value]) => value && /TOKEN|KEY|PASSWORD|SECRET/i.test(key)).map(([, value]) => value!);
 const message = (error: unknown) => redactText(error instanceof Error ? error.message : String(error), knownSecrets()).text;
 const exists = async (path: string) => (await stat(path).catch(() => null))?.isFile() ?? false;
 const nonempty = async (path: string) => await exists(path) && (await readFile(path, "utf8")).trim().length > 0;
@@ -62,8 +61,11 @@ export interface WatchOptions {
   on?: (event: WatchEvent) => void;
   sleep?: typeof pause;
 }
-/** End a run that never reached the executor. Nothing exists to collect or to publish, so both are closed. */
-const unlaunched = (record: RunRecord, end: "cancelled" | "error"): RunRecord => ({
+/**
+ * End a run that has nothing on the executor: it never reached it, or the executor removed what the failed launch
+ * left. Nothing exists to collect or to publish, so both are closed. A verdict that a poll made in between is dropped.
+ */
+const unlaunched = ({ unrecorded: _unrecorded, unknown_since: _unknown, ...record }: RunRecord, end: "cancelled" | "error"): RunRecord => ({
   ...record, state: "finished", status: "failed", end, finished_at: now(),
   collection: { state: "collected", path: null, report: null }, publication: { ...record.publication, state: "disabled" },
 });
@@ -86,6 +88,8 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
     if (!loaded.has(name)) loaded.set(name, executors(name));
     return loaded.get(name)!;
   };
+  /** The runs for which this process wrote the warning of an executor that does not know them. One line for each row of such answers. */
+  const warned = new Set<string>();
 
   async function collectUnlocked(id: string, force = false): Promise<RunRecord> {
     const record = await readRun(home, id);
@@ -137,53 +141,89 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
 
   async function observeUnlocked(id: string): Promise<RunRecord> {
     let record = await readRun(home, id);
-    if (record.state === "finished") return collectUnlocked(id);
+    // A run that ended with its completion record is final. A run that the host ended without one is asked about again.
+    const ended = record.state === "finished";
+    if (ended && !record.unrecorded) return collectUnlocked(id);
     if (record.state === "prepared") {
       // Nothing is on the platform yet, and the launcher can still be building the image, so age proves nothing.
       // Only a cancellation ends the run here. A launcher that is still alive reaches the same result itself.
       if (record.end !== "cancelled") return record;
       return updateRun(home, id, current => current.state === "prepared" ? unlaunched(current, "cancelled") : current);
     }
-    const observed = await (await executor(record.executor.name)).observe(record);
+    // What this call read. A launch writes its updates without the operation lock, so the record can change during the observation.
+    const read = { state: record.state, runtime_id: record.executor.runtime_id, error: record.error };
+    let observed: Observation;
+    try { observed = await (await executor(record.executor.name)).observe(record); }
+    catch (error) {
+      if (!ended) throw error;
+      // The verdict stands. The executor can be gone for good, and the collected package does not need it.
+      process.stderr.write(`Run ${id}: the ${record.executor.name} executor could not be asked again for the completion record (${message(error)}). The run stays as it is.\n`);
+      return collectUnlocked(id);
+    }
+    // The same answer as before: no record, and no runtime that is alive. Nothing changes.
+    if (ended && !observed.complete && observed.code !== null) return collectUnlocked(id);
     const cancelled = record.end === "cancelled", previouslyUnknown = !!record.unknown_since;
-    if (observed.code !== undefined || observed.complete) delete record.unknown_since;
+    if (observed.code !== undefined || observed.complete) { delete record.unknown_since; warned.delete(id); }
     if (observed.complete) {
       // The worker owns execution data. What the host decided at launch stays host-owned: the run's identity,
-      // its handles and its publication. A record from the store cannot change them.
+      // its profile, its handles and its publication. A record from the store cannot change them.
+      const { unrecorded: _unrecorded, unknown_since: _unknown, ...complete } = observed.complete;
       record = {
-        ...observed.complete, label: record.label, source: record.source,
-        profile: { ...observed.complete.profile, name: record.profile.name }, harness: { ...record.harness, version: observed.complete.harness.version },
+        ...complete, label: record.label, source: record.source,
+        profile: record.profile, harness: { ...record.harness, version: observed.complete.harness.version },
         executor: { ...record.executor, runtime_id: observed.runtime_id ?? record.executor.runtime_id }, publication: record.publication,
       };
       record.state = "finished";
       if (cancelled) record.end = "cancelled";
+      if (ended) process.stderr.write(`Run ${id}: the completion record is there now. The run is collected again.\n`);
     } else if (observed.code === null) {
+      if (ended) {
+        // The run was ended as lost, and the executor has it alive. That verdict was wrong, so it is dropped.
+        process.stderr.write(`Run ${id}: the ${record.executor.name} executor knows this run again, and it runs. The record of its end (${record.end}) is dropped.\n`);
+        const { error: _error, unrecorded: _unrecorded, ...alive } = record;
+        record = { ...alive, status: "pending", end: cancelled ? "cancelled" : null, exit_code: null, finished_at: null, collection: { state: "pending", path: null, report: null } };
+      }
       record.state = "running";
       record.executor.runtime_id = observed.runtime_id ?? record.executor.runtime_id;
-    } else if (observed.code === undefined && record.state === "running" && !cancelled
+    } else if (observed.code === undefined && record.state === "running"
       && Date.now() - Date.parse(record.unknown_since ??= now()) < LOST_AFTER) {
       // The platform does not know a run that this machine holds as running. Other credentials, or another
-      // environment, give the same answer for every run, and "lost" is final. So the run stays as it is until
-      // the answer has been the same for 30 minutes.
-      if (!previouslyUnknown) process.stderr.write(`Run ${id}: the ${record.executor.name} executor does not know this run. Check the credentials and the environment of this command. The run is recorded as lost if the answer stays the same for ${LOST_AFTER / 60_000} minutes.\n`);
+      // environment, give the same answer for every run, and "lost" ends the work on the run. So the run stays as it is until
+      // the answer has been the same for 30 minutes. This holds for a cancelled run too.
+      if (!previouslyUnknown || !warned.has(id)) {
+        warned.add(id);
+        const left = Math.max(1, Math.ceil((Date.parse(record.unknown_since) + LOST_AFTER - Date.now()) / 60_000));
+        process.stderr.write(`Run ${id}: the ${record.executor.name} executor does not know this run. Check the credentials and the environment of this command. The run is recorded as lost if the answer stays the same for ${LOST_AFTER / 60_000} minutes. The first such answer was at ${record.unknown_since}; ${left} ${left === 1 ? "minute is" : "minutes are"} left.\n`);
+      }
     } else if (observed.code !== undefined || record.state === "running"
       // The 30 minutes count from the hand-over to the platform. Preparation before it can take longer.
       || Date.now() - Date.parse(record.started_at ?? record.created_at) > 30 * 60_000) {
+      if (observed.code === undefined) {
+        process.stderr.write(`Run ${id}: the ${record.executor.name} executor has not known this run since ${record.unknown_since ?? record.started_at ?? record.created_at}. The run is recorded as ${cancelled ? "cancelled" : "lost"}.\n`);
+        warned.delete(id);
+      }
       record.state = "finished";
       record.status = "failed";
       record.end = cancelled ? "cancelled" : observed.code === undefined ? "lost" : "error";
       record.exit_code = observed.code ?? null;
       record.finished_at = now();
       record.error ??= "Worker exited without a completion record; retained outputs will be collected.";
+      // A later status asks the executor again: the record can show later, and "lost" can be wrong.
+      record.unrecorded = true;
     }
     // Whatever was collected before the run ended is stale. The worker's own collection block is never used.
     if (record.state === "finished") record.collection = { state: "pending", path: null, report: null };
     record.last_observed_at = now();
-    await updateRun(home, id, current => {
+    let stale = false;
+    const stored = await updateRun(home, id, current => {
+      // A launch wrote its result during the observation. That result is newer than the observation, so only the time is recorded.
+      stale = current.state !== read.state || current.executor.runtime_id !== read.runtime_id || current.error !== read.error;
+      if (stale) return { ...current, last_observed_at: record.last_observed_at };
       // A cancellation can arrive during network observation; do not overwrite it.
       if (current.end === "cancelled") record.end = "cancelled";
       return record;
     });
+    if (stale) return stored;
     return record.state === "finished" ? collectUnlocked(id) : record;
   }
 
@@ -333,7 +373,10 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
     async cancel(id: string): Promise<RunRecord> {
       const record = await readRun(home, id);
       if (record.state === "finished") return record;
-      await (await executor(record.executor.name)).cancel(record);
+      const found = await (await executor(record.executor.name)).cancel(record);
+      // Before the hand-over no runtime exists, and that is normal. A running run that the executor does not know
+      // was not stopped: other credentials, or another environment, give this answer. The record stays as it is.
+      if (found === false && record.state === "running") throw new Error(`Run ${id}: the ${record.executor.name} executor does not know this run, so nothing was stopped. Check the credentials and the environment of this command.`);
       return updateRun(home, id, current => current.state === "finished" ? current : { ...current, end: "cancelled" });
     },
     /** Rebuild missing local records from the retained stores of one executor. */
@@ -440,7 +483,7 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
         submitted = true;
         const runtimeId = await platform.launch(record, stage, key);
         // A poll during a slow submission can have ended the run as lost. The platform accepted the run, so that verdict is dropped.
-        record = await updateRun(home, id, ({ error: _lost, ...current }) => ({
+        record = await updateRun(home, id, ({ error: _lost, unrecorded: _unrecorded, unknown_since: _unknown, ...current }) => ({
           ...current, state: "running", status: "pending", end: current.end === "cancelled" ? "cancelled" : null, exit_code: null,
           started_at: now(), finished_at: null, collection: { state: "pending", path: null, report: null },
           executor: { ...current.executor, runtime_id: runtimeId },
@@ -449,8 +492,10 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
         return record;
       } catch (error) {
         const detail = redactText(message(error), [key]).text;
-        await updateRun(home, id, current => ({ ...(submitted ? current : unlaunched(current, current.end === "cancelled" ? "cancelled" : "error")), error: detail }));
-        throw new Error(`Run ${id}: ${detail}${submitted ? " Use status to reconcile a possibly accepted launch." : ""}`);
+        // The run stays open only when the platform can have accepted it. The executor says when nothing of it is left.
+        const open = submitted && !(error instanceof LaunchNotStarted);
+        await updateRun(home, id, current => ({ ...(open ? current : unlaunched(current, current.end === "cancelled" ? "cancelled" : "error")), error: detail }));
+        throw new Error(`Run ${id}: ${detail}${open ? " Use status to reconcile a possibly accepted launch." : ""}`);
       }
     },
   };

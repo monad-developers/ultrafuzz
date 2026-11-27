@@ -1,7 +1,7 @@
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { redactText } from "./artifacts";
+import { environmentSecrets, redactText } from "./artifacts";
 import type { RunRecord } from "./types";
 
 const OWNERSHIP = ".ultrafuzz-files.json";
@@ -14,19 +14,25 @@ function safePath(path: string): boolean {
 }
 
 function errorText(text: string): string {
-  const secrets = Object.entries(process.env).filter(([key, value]) => value && /(?:TOKEN|KEY|PASSWORD|SECRET)/i.test(key)).map(([, value]) => value!);
-  return redactText(text, secrets).text.slice(-3000);
+  return redactText(text, environmentSecrets()).text.slice(-3000);
 }
 
-async function command(args: string[], cwd: string, allowFailure = false): Promise<{ code: number; stdout: string; stderr: string }> {
-  const process = Bun.spawn(args, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const [code, stdout, stderr] = await Promise.all([process.exited, new Response(process.stdout).text(), new Response(process.stderr).text()]);
+async function command(args: string[], cwd: string, allowFailure = false, env?: Record<string, string | undefined>): Promise<{ code: number; stdout: string; stderr: string }> {
+  const child = Bun.spawn(args, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", ...(env ? { env } : {}) });
+  const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
   if (code !== 0 && !allowFailure) throw new Error(`${args[0]} ${args[1]} failed (${code}): ${errorText(stderr || stdout)}`);
   return { code, stdout, stderr };
 }
 
+/**
+ * `gh repo clone` gives its credentials to the clone only. The later commands in that checkout get them from the
+ * same helper as in source.ts, for github.com only. Git never asks at the terminal: a missing credential is an error.
+ */
 function git(args: string[], cwd: string, allowFailure = false) {
-  return command(["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", ...args], cwd, allowFailure);
+  return command([
+    "git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+    "-c", "credential.https://github.com.helper=", "-c", "credential.https://github.com.helper=!gh auth git-credential", ...args,
+  ], cwd, allowFailure, { ...process.env, GIT_TERMINAL_PROMPT: "0" });
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -96,8 +102,9 @@ async function applyArtifacts(checkout: string, root: string, id: string, artifa
   const manifestPath = await safeTarget(checkout, `${root}/${OWNERSHIP}`);
   await mkdir(dirname(manifestPath), { recursive: true });
   await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
-  // Add only the run subtree. Every untouched external file retains its bytes.
-  await git(["add", "--", root], checkout);
+  // Add only the run subtree. Every untouched external file retains its bytes. `--force`: an ignore rule of the
+  // results repository or of this machine must not leave a file of the package out of the commit without an error.
+  await git(["add", "--force", "--", root], checkout);
   const diff = await git(["diff", "--cached", "--quiet"], checkout, true);
   if (diff.code > 1) throw new Error(`Cannot compare staged artifacts: ${errorText(diff.stderr)}`);
   return diff.code === 1;
@@ -135,6 +142,10 @@ export async function publishRun(record: RunRecord, artifactDir: string, options
       const ref = merged ? (pr.baseRefName || info.defaultBranchRef.name)
         : remote.stdout.trim() ? branch : pr ? `refs/pull/${pr.number}/head` : info.defaultBranchRef.name;
       await git(["fetch", "--no-tags", "origin", ref], checkout);
+      // Only the directory of this run is read or written, so only that directory is checked out: the cost of a
+      // publication does not grow with the runs that the repository already holds. An older git that cannot do
+      // this checks out the whole tree, as before.
+      if ((await git(["sparse-checkout", "set", "--cone", root], checkout, true)).code !== 0) await git(["sparse-checkout", "disable"], checkout, true);
       await git(["checkout", "--detach", "--force", "FETCH_HEAD"], checkout);
       const changed = await applyArtifacts(checkout, root, record.id, artifacts);
       if (merged) {

@@ -1,8 +1,8 @@
 import { cp, lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { parse } from "smol-toml";
-import { bundledProfilesDirectory } from "./profiles";
+import { bundledProfilesDirectory, profileLitter } from "./profiles";
 import { EXECUTORS, HARNESSES, VERSION, type Config, type ExecutorName, type ExecutorResources, type Harness, type RepositoryConfig } from "./types";
 
 const template = `# Ultrafuzz ${VERSION} — global configuration
@@ -57,7 +57,7 @@ export async function initWorkspace(home: string): Promise<void> {
   await mkdir(join(home, "runs"), { recursive: true, mode: 0o700 });
   await mkdir(join(home, "prompts"), { recursive: true, mode: 0o700 });
   // New profiles are installed; local edits and existing config are preserved.
-  await cp(bundledProfilesDirectory, join(home, "prompts"), { recursive: true, force: false, errorOnExist: false, dereference: false });
+  await cp(bundledProfilesDirectory, join(home, "prompts"), { recursive: true, force: false, errorOnExist: false, dereference: false, filter: source => !profileLitter(basename(source)) });
   try { await writeFile(join(home, "ultrafuzz.toml"), template, { flag: "wx", mode: 0o600 }); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
   process.env.ULTRAFUZZ_PROFILE_DIR = join(home, "prompts");

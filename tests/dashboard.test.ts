@@ -1,17 +1,18 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setSystemTime, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initWorkspace } from "../src/config";
 import { serveDashboard } from "../src/dashboard";
 import type { Executor } from "../src/executor";
-import { writeRun } from "../src/store";
+import { readRun, writeRun } from "../src/store";
 import type { RunRecord } from "../src/types";
 
 const directories: string[] = [], servers: Array<() => void> = [];
 const previousRoot = process.env.ULTRAFUZZ_PROFILE_DIR;
 afterEach(async () => {
   for (const stop of servers.splice(0)) stop();
+  setSystemTime(); // Back to the real clock.
   if (previousRoot === undefined) delete process.env.ULTRAFUZZ_PROFILE_DIR;
   else process.env.ULTRAFUZZ_PROFILE_DIR = previousRoot;
   await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true })));
@@ -34,13 +35,13 @@ function record(home: string, id: string, changes: Partial<RunRecord> = {}): Run
 }
 
 /** A dashboard on a free port, with a fake executor that counts its calls and has no store. */
-async function dashboard() {
+async function dashboard(overrides: Partial<Executor> = {}) {
   const home = await mkdtemp(join(tmpdir(), "ultrafuzz-dashboard-")); directories.push(home);
   await initWorkspace(home);
   await writeFile(join(home, "ultrafuzz.toml"), `[defaults]\nharness = "opencode"\nmodel = "example/model"\naudit_profile = "v2/pareto"\n[openrouter]\nkey_env = "ULTRAFUZZ_DASHBOARD_TEST_KEY"\n[docker]\ncpu = 1\nmemory_mib = 1024\ntimeout_seconds = 3600\n[repositories.example]\nurl = "https://github.com/example/source"\n`);
   const calls: string[] = [];
   const call = (name: string) => async (): Promise<never> => { calls.push(name); throw new Error("Simulated store failure"); };
-  const executor: Executor = { launch: call("launch"), observe: call("observe"), download: call("download"), cancel: call("cancel"), recover: call("recover") };
+  const executor: Executor = { launch: call("launch"), observe: call("observe"), download: call("download"), cancel: call("cancel"), recover: call("recover"), ...overrides };
   const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("") });
   const port = probe.port!;
   await probe.stop(true);
@@ -89,6 +90,39 @@ test("a poll leaves settled runs alone and tries an unfinished collection again"
   const { runs } = await (await get("/api/runs")).json() as { runs: RunRecord[] };
   expect(runs.find(run => run.id === brokenId)!.collection).toMatchObject({ state: "failed", error: "Simulated store failure" });
   expect(calls).toEqual(["download"]);
+});
+
+test("the list does not try a failed collection again at each poll: the attempts move apart and end after five", async () => {
+  const { home, calls, get } = await dashboard();
+  await writeRun(home, record(home, brokenId, { collection: { state: "failed", path: null, report: null, error: "earlier failure" } }));
+  const poll = async () => { await get("/api/runs"); return calls.filter(name => name === "download").length; };
+  // The first poll tries once. The polls of the next two minutes do not.
+  expect([await poll(), await poll(), await poll()]).toEqual([1, 1, 1]);
+  // The page of one run is an explicit request: it tries at once, and it does not change the plan of the list.
+  await get(`/api/runs/${brokenId}`);
+  expect(await poll()).toBe(2);
+  // The next attempts of the list come 2, 4, 8 and 16 minutes after the one before. Then the list leaves the run alone.
+  const tried: number[] = [];
+  for (const minutes of [1, 1, 3, 1, 7, 1, 15, 1, 60, 600]) {
+    setSystemTime(new Date(Date.now() + minutes * 60_000 + 1000));
+    tried.push(await poll() - 2);
+  }
+  expect(tried).toEqual([0, 1, 1, 2, 2, 3, 3, 4, 4, 4]);
+  // A run that another command changed gets a new count: here a collection that worked and a publication that failed.
+  await writeRun(home, record(home, brokenId, { publication: { state: "failed", repository: "owner/results", branch: `ultrafuzz/${brokenId}`, path: `attempts/baseline/runs/${brokenId}`, pr_url: null, error: "push failed" } }));
+  // The package is not on this machine, so the status call downloads again, and fails again.
+  expect(await poll()).toBe(7);
+  expect(await poll()).toBe(7);
+});
+
+test("a cancel that the executor cannot do is an error for the page, not a success", async () => {
+  // The executor knows no runtime of the run, as with other credentials.
+  const { home, post } = await dashboard({ cancel: async () => false });
+  await writeRun(home, record(home, brokenId, { state: "running", status: "pending", end: null, finished_at: null, collection: { state: "pending", path: null, report: null } }));
+  const refused = await post(`/api/runs/${brokenId}/cancel`, {});
+  expect(refused.status).toBe(400);
+  expect(await refused.json()).toEqual({ error: `Run ${brokenId}: the docker executor does not know this run, so nothing was stopped. Check the credentials and the environment of this command.` });
+  expect((await readRun(home, brokenId)).end).toBeNull();
 });
 
 test("a launch from the dashboard passes the publish choice to the engine, and other origins are refused", async () => {

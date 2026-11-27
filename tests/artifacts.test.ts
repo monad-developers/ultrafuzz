@@ -1,10 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { parse } from "yaml";
-import { prepareArtifacts, redactDirectory, redactText } from "../src/artifacts";
+import { environmentSecrets, prepareArtifacts, redactDirectory, redactText } from "../src/artifacts";
 import type { RunRecord } from "../src/types";
 
 const directories: string[] = [];
@@ -57,6 +57,62 @@ test("positive credential patterns include Google, Modal, and valid JWT structur
   const result = redactText(input);
   expect(result.count).toBe(4);
   expect(result.text).toContain("eyJbad.notjson.signature");
+});
+
+test("the Modal token pattern leaves hyphenated words alone and still finds a token in every usual place", () => {
+  for (const text of [
+    "See https://example.org/findings/shares-can-be-used-as-collateral-without-a-health-check",
+    "treats-as-settled-any-pending-withdrawal",
+    "the-loan-is-marked-ak-collateralised-before-the-check-runs",
+    "known_as-abcdefghijklmnopqrstuvwxyz",
+  ]) expect(redactText(text)).toEqual({ text, count: 0 });
+  const id = `ak-${"A1b2C3d4E5".repeat(2)}xy`, secret = `as-${"Z9y8X7w6V5".repeat(2)}uv`;
+  for (const text of [`MODAL_TOKEN_ID=${id}`, `token_secret: "${secret}"`, `'${secret}'`, `(${id})`, `id ${id}, secret ${secret}.`, `${id}\n${secret}`]) {
+    const result = redactText(text);
+    expect(result.text).not.toContain(id.slice(3));
+    expect(result.text).not.toContain(secret.slice(3));
+    expect(result.count).toBe(text.split(/a[ks]-[A-Z]/).length - 1);
+  }
+});
+
+test("host environment values count as secrets only by name and from eight characters on", () => {
+  const environment = {
+    KEYTIMEOUT: "1", TOKENIZERS_PARALLELISM: "false", ANSIBLE_HOST_KEY_CHECKING: "False", PASSWORD_STORE_CLIP_TIME: "45", SHORT_SECRET: "1234567",
+    OPENROUTER_API_KEY: "sk-or-v1-example", MODAL_TOKEN_ID: "ak-example-id", MODAL_TOKEN_SECRET: "as-example-secret", GH_TOKEN: "ghp_example", GITHUB_TOKEN: "github_pat_example",
+    AWS_SECRET_ACCESS_KEY: "aws-secret-example", DB_PASSWORD: "12345678", PATH: "/usr/bin:/bin", HOME: "/home/operator", EMPTY_KEY: "", UNSET_TOKEN: undefined,
+  };
+  expect(environmentSecrets(environment).sort()).toEqual(["12345678", "ak-example-id", "as-example-secret", "aws-secret-example", "ghp_example", "github_pat_example", "sk-or-v1-example"]);
+  // A key that the caller knows exactly has no such limit.
+  expect(redactText("key=short", ["short"]).text).toBe("key=[REDACTED]");
+});
+
+test("a redaction pass can be stopped before a file, replaces files whole and keeps their mode", async () => {
+  const { source } = await fixture();
+  for (const name of ["a.txt", "b.txt", "c.txt"]) await writeFile(join(source, name), "known-secret\n");
+  await chmod(join(source, "a.txt"), 0o644);
+  // The pass is stopped when it comes to the third file. The files after it stay as they are.
+  let asked = 0;
+  expect(await redactDirectory(source, ["known-secret"], () => ++asked > 2)).toBe(2);
+  expect(await Promise.all(["a.txt", "b.txt", "c.txt"].map(name => readFile(join(source, name), "utf8")))).toEqual(["[REDACTED]\n", "[REDACTED]\n", "known-secret\n"]);
+  expect((await lstat(join(source, "a.txt"))).mode & 0o777).toBe(0o644);
+  // No temporary file is left, and a link at the name of the temporary file is not written through.
+  expect((await readdir(source)).sort()).toEqual(["a.txt", "b.txt", "c.txt", "prompt.txt", "raw"]);
+  const outside = join(source, "..", "outside.txt");
+  await writeFile(outside, "untouched");
+  await symlink(outside, join(source, `c.txt.ultrafuzz-redact-${process.pid}.tmp`));
+  expect(await redactDirectory(source, ["known-secret"])).toBe(1);
+  expect(await readFile(outside, "utf8")).toBe("untouched");
+  expect(await readFile(join(source, "c.txt"), "utf8")).toBe("[REDACTED]\n");
+});
+
+test("a file that an interrupted redaction pass left is not packaged and does not fail the package", async () => {
+  const { source, destination } = await fixture();
+  // Its name starts like a transcript, which is a mandatory artifact.
+  await writeFile(join(source, "raw/transcript.jsonl.ultrafuzz-redact-4242.tmp"), '{"message":"half');
+  expect(await redactDirectory(source, ["half"])).toBe(0);
+  const result = await prepareArtifacts(source, destination, record());
+  expect(result.omitted).toEqual([{ path: "raw/transcript.jsonl.ultrafuzz-redact-4242.tmp", reason: "file of an interrupted redaction pass excluded" }]);
+  expect((await readdir(join(destination, "raw"))).sort()).toEqual(["report.md", "transcript.jsonl"]);
 });
 
 test("OpenRouter keys are redacted after an interrupted worker without the launch environment", async () => {

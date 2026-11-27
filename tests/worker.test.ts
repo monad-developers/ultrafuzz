@@ -56,10 +56,46 @@ describe("worker execution contract", () => {
     const script = join(root, "bin/opencode"); writeFileSync(script, readFileSync(script, "utf8").replace("REPLACE", join(job.output_dir, "raw/report.md")));
     const record = await runWorker(root);
     expect(record.status).toBe("succeeded"); expect(record.continuation?.report_after).toBe(true); expect(record.session_id).toBe("ses_test");
+    // The first call ended by itself, without a report. The continuation block says so.
+    expect(record.continuation).toMatchObject({ initial_end: "completed", initial_exit_code: 0, exit_code: 0 });
     expect(readFileSync(join(job.output_dir, "raw/transcript.jsonl"), "utf8").split("ses_test").length - 1).toBe(2);
     expect(readFileSync(join(job.output_dir, "raw/stderr.log"), "utf8")).not.toContain("test-secret-never-publish");
     expect(JSON.parse(readFileSync(join(root, "complete.json"), "utf8"))).toEqual(record);
     expect(existsSync(join(job.output_dir, "run.yml"))).toBe(true);
+  });
+  test("a first call that reached its time limit stays in the record after a continuation that completed", async () => {
+    const { root, job } = await stubRun(`if [[ "$*" == *"--session ses_test"* ]]; then echo '# Report' > 'REPORT'; else sleep 30; fi`);
+    const script = join(root, "bin/opencode"); writeFileSync(script, readFileSync(script, "utf8").replace("REPORT", join(job.output_dir, "raw/report.md")));
+    fakeSync(root);
+    // A run of 30 minutes keeps 15 for the continuation and the export. The first call gets about one second.
+    job.deadline_at = new Date(Date.now() + 15 * 60_000 + 1200).toISOString();
+    job.record.executor.timeout_seconds = 1800;
+    job.record.profile.sha256 = "d".repeat(64);
+    writeFileSync(join(root, "job.json"), JSON.stringify(job));
+    const record = await runWorker(root);
+    // `end` and `exit_code` describe the last call. The first outcome is in the continuation block.
+    expect(record).toMatchObject({ status: "succeeded", end: "completed", exit_code: 0 });
+    expect(record.continuation).toMatchObject({ trigger: "missing-report", initial_end: "timeout", initial_exit_code: null, exit_code: 0, report_after: true });
+    // The profile digest is the one that the host made at launch. The worker does not replace it.
+    expect(record.profile.sha256).toBe("d".repeat(64));
+    expect(JSON.parse(readFileSync(join(root, "complete.json"), "utf8"))).toEqual(record);
+  }, 20_000);
+  // Root reads and lists everything, so the unreadable entries only work for a normal user.
+  test.skipIf(process.getuid?.() === 0)("one entry that cannot be copied does not end the workspace export, and the record says that it is incomplete", async () => {
+    const { root, job } = await stubRun("mkdir -p notes sealed agents; for i in $(seq 1 30); do echo n > notes/$i.txt; done; echo x > notes/locked.txt; chmod 000 notes/locked.txt; echo y > sealed/inside.txt; chmod 000 sealed; echo plan > agents/plan.md; echo '# Report' > 'REPORT'");
+    const script = join(root, "bin/opencode"), raw = join(job.output_dir, "raw"); writeFileSync(script, readFileSync(script, "utf8").replace("REPORT", join(raw, "report.md")));
+    fakeSync(root);
+    let record;
+    try { record = await runWorker(root); }
+    finally { for (const name of ["notes/locked.txt", "sealed"]) if (existsSync(join(job.workspace, name))) chmodSync(join(job.workspace, name), 0o700); }
+    expect(record.status).toBe("succeeded");
+    // The file and the directory that cannot be read are left out. Every other new file is there, and so is the agents directory.
+    expect(readdirSync(join(raw, "workspace/notes")).length).toBe(30);
+    expect(readdirSync(join(raw, "workspace")).sort()).toEqual(["agents", "notes"]);
+    expect(readFileSync(join(raw, "agents/plan.md"), "utf8")).toBe("plan\n");
+    expect(record.omitted.filter(item => item.path === "raw/workspace")).toEqual([{ path: "raw/workspace", reason: "Export incomplete: 2 entries could not be copied; the workspace stays in the run store" }]);
+    expect(readFileSync(join(raw, "worker.log"), "utf8")).toContain("Workspace export incomplete; source remains in the run store: 2 entries could not be copied. First error:");
+    expect(JSON.parse(readFileSync(join(root, "complete.json"), "utf8"))).toEqual(record);
   });
   test("a second missing report finishes failed without a third invocation", async () => {
     const { root, job } = await stubRun("echo '{\"type\":\"step_finish\",\"part\":{\"id\":\"step\",\"cost\":0.02,\"tokens\":{\"input\":4,\"output\":2}}}'");
@@ -224,13 +260,24 @@ describe("worker execution contract", () => {
     expect(JSON.parse(readFileSync(join(root, "complete.json"), "utf8")).collection.state).toBe("failed");
   });
   test("native configs keep host credentials out and select OpenRouter", () => {
-    for (const harness of ["claude-code", "opencode", "codex"] as const) {
-      const { root, job } = jobFixture(harness); const context = prepareHarness(root, job, "secret");
-      expect(context.env.MODAL_TOKEN_SECRET).toBeUndefined(); expect(context.env.GITHUB_TOKEN).toBeUndefined();
-      expect(harnessCommand(context, "ses_test").join(" ")).toContain(harness === "codex" ? "resume ses_test" : harness === "claude-code" ? "--resume ses_test" : "--session ses_test");
-      expect(readFileSync(context.configPath, "utf8")).not.toContain("secret");
-      if (harness === "claude-code") expect(context.env.ANTHROPIC_AUTH_TOKEN).toBe("secret");
-    }
+    // The host credentials are set here, so the test fails when the harness environment takes them from the worker's own.
+    const sentinels = { MODAL_TOKEN_ID: "sentinel-modal-token-id", MODAL_TOKEN_SECRET: "sentinel-modal-token-secret", GITHUB_TOKEN: "sentinel-github-token", GH_TOKEN: "sentinel-gh-token" };
+    const saved = Object.fromEntries(Object.keys(sentinels).map(name => [name, process.env[name]]));
+    Object.assign(process.env, sentinels);
+    const texts = (directory: string): string => readdirSync(directory, { withFileTypes: true }).map(entry => entry.isDirectory() ? texts(join(directory, entry.name)) : entry.isFile() ? readFileSync(join(directory, entry.name), "latin1") : "").join("\n");
+    try {
+      for (const harness of ["claude-code", "opencode", "codex"] as const) {
+        const { root, job } = jobFixture(harness); const context = prepareHarness(root, job, "secret");
+        expect(context.env.MODAL_TOKEN_SECRET).toBeUndefined(); expect(context.env.GITHUB_TOKEN).toBeUndefined();
+        // No variable of the harness and no file that was written for it holds a host credential.
+        const written = `${Object.values(context.env).join("\n")}\n${texts(root)}`;
+        for (const value of Object.values(sentinels)) expect(written.includes(value) ? value : "").toBe("");
+        expect(context.env.PATH).toBe(process.env.PATH!);
+        expect(harnessCommand(context, "ses_test").join(" ")).toContain(harness === "codex" ? "resume ses_test" : harness === "claude-code" ? "--resume ses_test" : "--session ses_test");
+        expect(readFileSync(context.configPath, "utf8")).not.toContain("secret");
+        if (harness === "claude-code") expect(context.env.ANTHROPIC_AUTH_TOKEN).toBe("secret");
+      }
+    } finally { for (const [name, value] of Object.entries(saved)) if (value === undefined) delete process.env[name]; else process.env[name] = value; }
   });
   test("a profile config fragment wins over the generated configuration, as the README says", () => {
     // A profile is trusted: its fragment can change the model and the provider route. If this changes, change the README too.
