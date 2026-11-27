@@ -10,7 +10,7 @@ import { validateRunId } from "./store";
 import { EXECUTORS, HARNESSES, VERSION, type ExecutorName, type Harness, type LaunchOptions, type RunRecord } from "./types";
 
 const help = `ultrafuzz ${VERSION} — prompt-driven audits on Docker or Modal
-Experimental release: live audit runs have completed only with v2/pareto, OpenCode and Modal.
+Experimental release: live runs have completed only with OpenCode on Modal.
 
 Usage: ultrafuzz <command> [options]
 

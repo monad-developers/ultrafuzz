@@ -1,6 +1,6 @@
 # Ultrafuzz v0.2 (experimental)
 
-> **Experimental release (`0.2.0-experimental`).** Three real audits have completed on this runner: the profile `v2/pareto` with OpenCode on the Modal executor, on a Foundry project, a Hardhat project and a Vyper project. No real audit has completed on Docker, with Claude Code or Codex, or with the other two profiles. No test calls a model. The offline tests use fakes, and the two live tests (one on a real Docker Engine, one on a real Modal account) use a stub harness. Expect failures, and expect the interface to change.
+> **Experimental release (`0.2.0-experimental`).** Five real runs have completed on this runner, all with OpenCode on the Modal executor: three of the profile `v2/pareto` (a Foundry project, a Hardhat project and a Vyper project), and one each of `v2/property-specification-collaborative` and `v2/stateful-fuzzing` (the Foundry project). No real run has completed on Docker, or with Claude Code or Codex. No test calls a model. The offline tests use fakes, and the two live tests (one on a real Docker Engine, one on a real Modal account) use a stub harness. Expect failures, and expect the interface to change.
 
 Ultrafuzz starts one security audit from one prompt and brings the agent's `report.md` back to your machine. A profile supplies the prompt and its skills. The agent harness (Claude Code, OpenCode or Codex) controls the audit and any subagents. The runner does the rest: launch, timeouts, one continuation when the report is missing, collection, and optional publication to GitHub.
 
@@ -20,7 +20,8 @@ In the code, with tests that call no model:
 
 Not done:
 
-- Real audits have completed only with `v2/pareto`, OpenCode and Modal (three runs). No real audit has completed on Docker, with Claude Code or Codex, or with the other two profiles.
+- Real runs have completed only with OpenCode on Modal: three of `v2/pareto`, one of `v2/property-specification-collaborative` and one of `v2/stateful-fuzzing`. No real run has completed on Docker, or with Claude Code or Codex.
+- The Recon fuzzer does not start in the worker image. See [Tools in the worker image](#tools-in-the-worker-image).
 - No real run has reached its time limit. The collection of such a run is not tested.
 - No publication to a real GitHub repository.
 - Treat the Docker executor as untested on a commit until the `docker` job of the Check workflow passes for that commit.
@@ -192,7 +193,7 @@ A run is settled when it has ended, it is collected, and it is published if publ
 | `v2/property-specification-collaborative` | Eight lenses each write a property catalog and share one log file. A fan-in merges the catalogs into `report.md` with stable IDs (`P-001`, ...). Work in progress. | `claude-code`, `opencode`, `codex` | The source. Optional offline copies of the pinned references. |
 | `v2/stateful-fuzzing` | Implements the supplied properties and runs a bounded stateful fuzzing campaign. | `claude-code`, `opencode`, `codex` | The source and a properties report (`--properties`, required). |
 
-Only `v2/pareto` has completed live runs on this runner: three, on Modal with OpenCode. The other two profiles have not completed one. The only deliverable of each profile is `report.md`. A launch with a harness that the profile does not list fails before execution.
+Each profile has completed a live run on this runner, on Modal with OpenCode: `v2/pareto` three, and the other two profiles one each. In that test the stateful-fuzzing run used the report of the property-specification run as its input. The only deliverable of each profile is `report.md`. A launch with a harness that the profile does not list fails before execution.
 
 **Property specification.** Each lens studies one or two external references, pinned by repository and commit. The profile does not contain their text. A lens downloads them during the run. To supply one offline, pass a snapshot of its repository as an input with the reference ID as its name, for example `--input reference-properties-crytic=./crytic-properties`. The IDs are in `skills/property-specification-collaborative/references.md` in the profile. When the harness can start subagents, the lenses run as subagents in two groups of four. Otherwise they run one after another in the same session.
 
@@ -339,7 +340,7 @@ A custom image must provide `sh`, `mkdir`, `cp`, `touch`, `sync`, a GNU-style `t
 
 Select Modal with `executor = "modal"` under `[defaults]`, or with `--executor modal` for one run. The host needs Modal credentials and a `[modal]` table. It needs no Docker.
 
-**What is tested.** The live test with a stub harness (`bun run test:modal`, see [Development and tests](#development-and-tests)) passes on a real Modal account. Three real audits (`v2/pareto` with OpenCode) have completed on Modal, and `ultrafuzz watch` collected each report. Those runs used a worker from an earlier commit of this release.
+**What is tested.** The live test with a stub harness (`bun run test:modal`, see [Development and tests](#development-and-tests)) passes on a real Modal account. Five real runs with OpenCode have completed on Modal: three of `v2/pareto`, one of `v2/property-specification-collaborative` and one of `v2/stateful-fuzzing`. `ultrafuzz watch` collected each report. Those runs used a worker from an earlier commit of this release.
 
 **Credentials.** Ultrafuzz uses the Modal client library. The library reads `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` from the environment. Without them it reads the profile file `~/.modal.toml`, which `modal token new` of the Modal command line writes. `MODAL_ENVIRONMENT` selects the Modal environment. `environment` in the `[modal]` table, when set, is used instead of it. A launch checks for credentials before it builds the image and before it clones the source. The credentials stay on the host.
 
@@ -393,6 +394,8 @@ Use `cancel` to stop one run. The local files of a run are in `~/.ultrafuzz/runs
 ### Tools in the worker image
 
 The package Dockerfile lists every tool with its pinned version. Both executors build the image from it. For Vyper projects: `vyper` is Vyper 0.3.9, because Slither and crytic-compile in the image read the output of Vyper 0.3 only. The second version is Vyper 0.4.3. Each version is on `PATH` as `vyper-<version>` and is installed at `/opt/vyper/<version>/vyper`. To use the other version as `vyper` for one command, put its directory first: `PATH="/opt/vyper/0.4.3:$PATH" forge build`. For any other compiler version, and for Python packages, make an environment for the project with `uv` (`uv venv`, `uv pip install`). `uv` can also download other Python versions. Test frameworks are not preinstalled, because they must match the compiler of the project. For Solidity, `solc-select` installs compiler versions, and `solc` runs the selected one.
+
+**Recon does not start.** The image installs the Recon fuzzer as its release binary, and that binary needs version 2.39 of the C library. The image is Debian 12, which has version 2.36, so `recon` stops with a `GLIBC` error. A real `v2/stateful-fuzzing` run reported this. That run used Foundry and Echidna, which work. Medusa starts in the image, but no real run has used it. `recon-generate` is a different program and is not affected.
 
 ## Credentials and limits
 

@@ -1,6 +1,6 @@
 {
   "name": "v2/stateful-fuzzing",
-  "description": "Implement supplied Markdown properties and run a bounded stateful fuzzing campaign. Experimental; no live run on this runner yet.",
+  "description": "Implement supplied Markdown properties and run a bounded stateful fuzzing campaign. Experimental: one live run has completed on this runner, on Modal with OpenCode.",
   "harnesses": ["claude-code", "opencode", "codex"],
   "available": true,
   "requires_properties": true

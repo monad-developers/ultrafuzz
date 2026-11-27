@@ -58,6 +58,7 @@ jobs:
             timeout --version
             for tool in sol2cg sol2test sol2bnd sol-storage-analyzer storage-trace roundme; do test -x "/usr/local/bin/$tool"; done
             # These tools have no other check in this step. Each must be on PATH.
+            # "recon" is only checked for its file: the release binary needs glibc 2.39 and does not start on Debian 12.
             for tool in recon recon-generate solc jq rg git-lfs; do command -v "$tool"; done
             test -f /opt/ultrafuzz/worker.js
             test -d /opt/ultrafuzz/plugins
