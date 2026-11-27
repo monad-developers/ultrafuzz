@@ -2,10 +2,10 @@ import { afterEach, expect, setSystemTime, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { main } from "../src/cli";
+import { endHeldProcess, main } from "../src/cli";
 import { initWorkspace } from "../src/config";
 import type { Publisher, WatchOptions } from "../src/engine";
-import type { ExecutorSource } from "../src/executor";
+import { unansweredRequest, unansweredRequests, type ExecutorSource } from "../src/executor";
 import { writeRun } from "../src/store";
 import type { RunRecord } from "../src/types";
 
@@ -57,7 +57,7 @@ const noExecutor: ExecutorSource = async () => {
   return { launch: fail, observe: fail, download: fail, cancel: fail, recover: fail };
 };
 /** What the next `cli` calls use in place of the real adapters. Reset after each test. */
-let executors: ExecutorSource = noExecutor, publisher: Publisher | undefined, timing: Pick<WatchOptions, "sleep" | "retry"> | undefined;
+let executors: ExecutorSource = noExecutor, publisher: Publisher | undefined, timing: Parameters<typeof main>[3];
 /** Run the CLI in-process and capture what it prints and whether it failed. */
 async function cli(...args: string[]): Promise<{ out: string; err: string; code: number }> {
   const stdout = process.stdout.write, stderr = process.stderr.write, previous = process.exitCode;
@@ -170,6 +170,91 @@ test("a failed publication fails wait and collect, and a local-only run does not
     expect(JSON.parse(local.out).publication).toBe("disabled");
   }
 });
+
+test("a run whose pull request was merged before a later collection stays published, and status says why it was not published again", async () => {
+  const home = await workspace();
+  const reason = `Results for ${id} were already merged; these artifacts differ. Preserve the merged result and publish a new run.`;
+  await settledRun(home, { publication: { state: "published", repository: "owner/results", branch: `ultrafuzz/${id}`, path: `attempts/baseline/runs/${id}`, pr_url: "https://github.com/owner/results/pull/7", error: reason } });
+  for (const command of ["status", "wait", "collect"]) {
+    const human = await cli(command, id, "--home", home);
+    expect(human.code).toBe(0);
+    expect(human.out).toContain("Results PR: https://github.com/owner/results/pull/7\n");
+    expect(human.out).toContain(`Not published again: ${reason}\n`);
+    expect(human.out).not.toContain("Publication failed");
+  }
+  // A published run without such a reason has no such line.
+  await settledRun(home, { publication: { state: "published", repository: "owner/results", branch: `ultrafuzz/${id}`, path: `attempts/baseline/runs/${id}`, pr_url: "https://github.com/owner/results/pull/7" } });
+  expect((await cli("status", id, "--home", home)).out).not.toContain("Not published again");
+});
+
+test("a one-shot command ends the process itself when a request to the executor is still open; viewer, wait and watch never do", async () => {
+  const home = await workspace(); await settledRun(home);
+  const exits: number[] = [];
+  timing = { exit: code => { exits.push(code); } };
+  // No request is open: no command ends the process.
+  expect(unansweredRequests()).toBe(0);
+  for (const args of [["status", id], ["list"], ["wait", id], ["watch", "--once"]]) await cli(...args, "--home", home);
+  expect(exits).toEqual([]);
+  // A look at a Modal sandbox got no answer in its time limit and is still open.
+  const answered = unansweredRequest();
+  try {
+    // Each one-shot command ends the process after its output, with its own exit code. `recover` and `launch` fail here.
+    const results = [];
+    for (const args of [["status", id], ["collect", id], ["cancel", id], ["list"], ["recover"], ["launch", "example", "--label", "one"]]) results.push(await cli(...args, "--home", home));
+    expect(results.map(result => result.code)).toEqual([0, 0, 0, 0, 1, 1]);
+    expect(exits).toEqual([0, 0, 0, 0, 1, 1]);
+    expect(results[0]!.out).toContain(`${id}  baseline  succeeded (completed)`);
+    // A command that polls, a command without an executor, and an argument error do not.
+    exits.length = 0;
+    for (const args of [["wait", id], ["watch", "--once"], ["watch", id], ["profiles"], ["--version"], ["--help"], ["no-such-command"]]) await cli(...args, "--home", home);
+    expect(exits).toEqual([]);
+    // The rule itself, for each command of the command line. `viewer` serves until it is stopped.
+    const ended: string[] = [];
+    for (const command of ["init", "launch", "list", "status", "wait", "watch", "collect", "cancel", "recover", "profiles", "viewer"]) {
+      if (await endHeldProcess(command, () => { ended.push(command); }, 1)) expect(ended.at(-1)).toBe(command);
+      expect(await endHeldProcess(command, () => { ended.push(`${command} with nothing open`); }, 0)).toBe(false);
+    }
+    expect(ended).toEqual(["launch", "list", "status", "collect", "cancel", "recover"]);
+    expect(await endHeldProcess(undefined, () => { ended.push("no command"); }, 1)).toBe(false);
+  } finally { answered(); }
+  expect(unansweredRequests()).toBe(0);
+  // The request was answered late: the process ends by itself again.
+  await cli("status", id, "--home", home);
+  expect(exits).toEqual([]);
+});
+
+test("the real command line ends a one-shot command that an open request holds, with its output whole, and leaves watch alone", async () => {
+  // The record is larger than a pipe takes at once, so an exit that does not wait for the output cuts it.
+  const home = await workspace(), text = "long error text ".repeat(20_000); await settledRun(home, { error: text });
+  // This file is loaded before the command line. It opens one request and keeps the process alive for some time, as a
+  // call without an answer can. A process that is not ended before that time ends with code 99.
+  const hold = join(home, "hold.ts"), entry = new URL("../src/cli.ts", import.meta.url).pathname;
+  await writeFile(hold, `import { unansweredRequest } from ${JSON.stringify(new URL("../src/executor.ts", import.meta.url).pathname)};\nunansweredRequest();\nsetTimeout(() => process.exit(99), 15_000);\n`);
+  const command = (...args: string[]) => [process.execPath, "--preload", hold, entry, ...args, "--home", home];
+  // `list` prints its result into the pipe of a shell and ends by itself. The shell gives the exit code of the command.
+  const list = Bun.spawn(["bash", "-c", '"$@" | cat; exit "${PIPESTATUS[0]}"', "bash", ...command("list", "--json")], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const [code, out] = await Promise.all([list.exited, new Response(list.stdout).text()]);
+  expect(code).toBe(0);
+  expect(out.length).toBeGreaterThan(300_000);
+  expect(JSON.parse(out)).toMatchObject({ schema: "ultrafuzz.list.v2", runs: [{ id, error: text }] });
+  // A failed one-shot command keeps its exit code.
+  expect(await Bun.spawn(command("status", "20200101-000000-00000000"), { stdin: "ignore", stdout: "ignore", stderr: "ignore" }).exited).toBe(1);
+  // `watch` prints its summary and is not ended: the process is still there some time later.
+  const watch = Bun.spawn(command("watch", "--once"), { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+  try {
+    let printed = "";
+    const reader = watch.stdout.getReader(), decoder = new TextDecoder();
+    while (!printed.includes("\n")) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      printed += decoder.decode(value);
+    }
+    reader.releaseLock();
+    expect(printed).toContain("No runs to watch.");
+    await Bun.sleep(700);
+    expect(watch.exitCode).toBeNull();
+  } finally { watch.kill(); await watch.exited; }
+}, 60_000);
 
 test("a run that failed before it started shows its cause and does not fail wait or collect", async () => {
   const home = await workspace();

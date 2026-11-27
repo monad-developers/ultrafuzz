@@ -32,6 +32,19 @@ export class LaunchNotStarted extends Error {
   }
 }
 
+let unanswered = 0;
+/**
+ * Record a request to a platform that got no answer in its time limit and is still open. The result is called
+ * when the request ends after all. An open request can keep the process alive after a command has printed its result.
+ */
+export function unansweredRequest(): () => void {
+  let open = true;
+  unanswered++;
+  return () => { if (open) { open = false; unanswered--; } };
+}
+/** The number of such requests that are still open in this process. */
+export const unansweredRequests = () => unanswered;
+
 /** The contract between the core and one execution platform. The core owns everything else. */
 export interface Executor {
   /** Optional host checks and image preparation. It creates nothing for the run, so a failure here is a plain failed launch. */

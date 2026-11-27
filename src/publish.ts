@@ -8,6 +8,17 @@ const OWNERSHIP = ".ultrafuzz-files.json";
 interface Ownership { schema: "ultrafuzz.files.v1"; run_id: string; files: string[] }
 interface PullRequest { number: number; state: "OPEN" | "CLOSED" | "MERGED"; url: string; mergedAt: string | null; baseRefName: string }
 
+/**
+ * The pull request of the run was merged, and the package differs from the merged files. Merged results are never
+ * changed, so a new attempt with the same package gives the same answer.
+ */
+export class ResultsMerged extends Error {
+  constructor(id: string) {
+    super(`Results for ${id} were already merged; these artifacts differ. Preserve the merged result and publish a new run.`);
+    this.name = "ResultsMerged";
+  }
+}
+
 function safePath(path: string): boolean {
   return path.length > 0 && !path.startsWith("/") && !path.includes("\\") && !/[\x00-\x1f\x7f]/.test(path)
     && path.split("/").every((part) => part !== "" && part !== "." && part !== "..");
@@ -149,7 +160,7 @@ export async function publishRun(record: RunRecord, artifactDir: string, options
       await git(["checkout", "--detach", "--force", "FETCH_HEAD"], checkout);
       const changed = await applyArtifacts(checkout, root, record.id, artifacts);
       if (merged) {
-        if (changed) throw new Error(`Results for ${record.id} were already merged; these artifacts differ. Preserve the merged result and publish a new run.`);
+        if (changed) throw new ResultsMerged(record.id);
         return { pr_url: pr.url };
       }
       if (changed) {
@@ -182,6 +193,8 @@ export async function publishRun(record: RunRecord, artifactDir: string, options
     if (!/^https:\/\/[^\s]+\/pull\/\d+$/.test(url)) throw new Error("GitHub did not return a result PR URL; retry collection to look it up");
     return { pr_url: url };
   } catch (error) {
+    // The caller must know this answer from every other failure. Its text holds only the run ID.
+    if (error instanceof ResultsMerged) throw error;
     throw new Error(errorText(error instanceof Error ? error.message : String(error)));
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }

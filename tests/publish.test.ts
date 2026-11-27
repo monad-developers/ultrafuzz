@@ -34,7 +34,7 @@ async function fixture() {
   await writeFile(state, "[]");
   const record = { id, label: "baseline", publication: { repository: "example/results", branch, path: runPath } };
   await writeFile(join(root, "record.json"), JSON.stringify(record));
-  await writeFile(join(root, "publish.ts"), `import { publishRun } from ${JSON.stringify(publisher)};\ntry { console.log(JSON.stringify(await publishRun(await Bun.file(process.argv[2]).json(), process.argv[3]))); } catch (error) { console.error(error.message); process.exit(1); }\n`);
+  await writeFile(join(root, "publish.ts"), `import { publishRun } from ${JSON.stringify(publisher)};\ntry { console.log(JSON.stringify(await publishRun(await Bun.file(process.argv[2]).json(), process.argv[3]))); } catch (error) { console.error(error.name + ": " + error.message); process.exit(1); }\n`);
   await writeFile(join(bin, "gh"), `#!${process.execPath}
 import { readFile, writeFile } from "node:fs/promises";
 const args = process.argv.slice(2), state = process.env.TEST_PR_STATE;
@@ -100,6 +100,8 @@ test("merged unchanged results return the old PR; changed artifacts fail without
   const changed = await f.publish();
   expect(changed.code).toBe(1);
   expect(changed.stderr).toContain("already merged");
+  // The caller gets this answer as an error of its own class, so it can tell it from a failure that a new attempt can repair.
+  expect(changed.stderr).toStartWith(`ResultsMerged: Results for ${id} were already merged; these artifacts differ.`);
   expect(await git(["rev-parse", "main"], f.remote)).toBe(head);
 });
 
@@ -248,4 +250,14 @@ test("only the directory of the run is checked out, whatever the results reposit
   await chmod(join(old.bin, "git"), 0o755);
   expect((await old.publish()).code).toBe(0);
   expect(await git(["show", `${branch}:${runPath}/report.md`], old.remote)).toBe("Report one\n");
+
+  // A git that has the command but fails to set the directory of the run can leave a sparse checkout of another
+  // directory behind. The publication then turns the sparse checkout off and works with the whole tree.
+  const partial = await fixture();
+  await writeFile(join(partial.bin, "git"), `#!/bin/sh\nprevious=\nfor arg in "$@"; do\n  if [ "$previous" = "sparse-checkout" ] && [ "$arg" = "set" ]; then "$TEST_GIT" sparse-checkout set --cone not-the-run >/dev/null 2>&1; echo "error: the cone could not be set" >&2; exit 129; fi\n  previous=$arg\ndone\nexec "$TEST_GIT" "$@"\n`);
+  await chmod(join(partial.bin, "git"), 0o755);
+  const published = await partial.publish();
+  expect(published.stderr).toBe("");
+  expect(published.code).toBe(0);
+  expect(await git(["show", `${branch}:${runPath}/report.md`], partial.remote)).toBe("Report one\n");
 });

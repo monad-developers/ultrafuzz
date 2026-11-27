@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { initWorkspace, loadConfig, resolveHome } from "./config";
 import type { Publisher, WatchEvent, WatchOptions, WatchRow } from "./engine";
-import type { ExecutorSource } from "./executor";
+import { unansweredRequests, type ExecutorSource } from "./executor";
 import { listProfiles } from "./profiles";
 import { validateRunId } from "./store";
 import { EXECUTORS, HARNESSES, VERSION, type ExecutorName, type Harness, type LaunchOptions, type RunRecord } from "./types";
@@ -126,6 +126,8 @@ function details(run: RunRecord): string {
   if (run.collection.state === "failed") lines.push(`Collection failed: ${run.collection.error ?? "unknown error"}`);
   if (run.publication.pr_url) lines.push(`Results PR: ${run.publication.pr_url}`);
   else if (run.publication.state === "failed") lines.push(`Publication failed: ${run.publication.error ?? "unknown error"}`);
+  // The pull request was merged before a later collection gave another package. The run stays published.
+  if (run.publication.state === "published" && run.publication.error) lines.push(`Not published again: ${run.publication.error}`);
   return lines.join("\n");
 }
 const outcome = (run: RunRecord) => ({
@@ -138,9 +140,34 @@ function executorName(value: string | undefined): ExecutorName | undefined {
   return value as ExecutorName | undefined;
 }
 
-/** `executors`, `publisher` and `timing` replace the real adapters, the GitHub publisher and the pauses of `watch` in tests; the command line never sets them. */
-export async function main(args = process.argv.slice(2), executors?: ExecutorSource, publisher?: Publisher, timing: Pick<WatchOptions, "sleep" | "retry"> = {}): Promise<void> {
-  let jsonOutput = args.includes("--json");
+/** The commands that do one piece of work, print one result and end. `viewer` serves until it is stopped, and `wait` and `watch` poll. */
+const ONE_SHOT = ["launch", "list", "status", "collect", "cancel", "recover"];
+/**
+ * A request to the executor that got no answer in its time limit stays open, and it can keep the process alive
+ * after the command has printed its result. A one-shot command then ends the process itself, with the exit code
+ * that it has set. `exit` is not called for another command, or when no such request is open. The result says if it was called.
+ */
+export async function endHeldProcess(command: string | undefined, exit: (code: number) => unknown, open = unansweredRequests()): Promise<boolean> {
+  if (!command || !ONE_SHOT.includes(command) || open <= 0) return false;
+  await exit(Number(process.exitCode ?? 0));
+  return true;
+}
+/**
+ * End the process after everything that was written to the two output streams has left it. Bun writes to a pipe in
+ * the background, so each stream is closed first: an exit before that cuts the output of the command.
+ */
+async function exitFlushed(code: number): Promise<never> {
+  await Promise.all([process.stdout, process.stderr].map(stream => new Promise<void>(done => { stream.once("error", () => done()); stream.end(() => done()); })));
+  process.exit(code);
+}
+
+/**
+ * `executors`, `publisher` and `timing` replace the real adapters, the GitHub publisher and the pauses of `watch` in tests; the command line never sets them.
+ * `timing.exit` replaces the end of the process, which only the command line itself does.
+ */
+export async function main(args = process.argv.slice(2), executors?: ExecutorSource, publisher?: Publisher, timing: Pick<WatchOptions, "sleep" | "retry"> & { exit?: (code: number) => unknown } = {}): Promise<void> {
+  const { exit: end, ...pauses } = timing;
+  let jsonOutput = args.includes("--json"), ran: string | undefined;
   try {
     const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
       home: { type: "string" }, json: { type: "boolean" }, help: { type: "boolean", short: "h" }, version: { type: "boolean" },
@@ -155,6 +182,7 @@ export async function main(args = process.argv.slice(2), executors?: ExecutorSou
     const [command, argument, ...extra] = positionals;
     const commands = ["init", "launch", "list", "status", "wait", "watch", "collect", "cancel", "recover", "profiles", "viewer"];
     if (!commands.includes(command!)) throw new Error(`Unknown command ${command}. Run ultrafuzz --help.`);
+    ran = command;
     if (extra.length && command !== "watch") throw new Error("Unexpected positional arguments.");
     const flags: Record<string, string[]> = {
       launch: ["repository", "label", "profile", "harness", "model", "effort", "properties", "key-env", "timeout", "input", "inputs", "executor", "revision", "publish"],
@@ -200,7 +228,7 @@ export async function main(args = process.argv.slice(2), executors?: ExecutorSou
       process.on("SIGINT", stop); process.on("SIGTERM", stop);
       let rows: WatchRow[];
       try {
-        rows = await engine.watch({ ...timing, ids, label: values.label, interval: seconds * 1000, once: !!values.once, signal: controller.signal,
+        rows = await engine.watch({ ...pauses, ids, label: values.label, interval: seconds * 1000, once: !!values.once, signal: controller.signal,
           on: event => {
             const { type, run, attempt, attempts, error } = event;
             const failure = attempt ? { attempt, attempts, error: (run.collection.state === "failed" ? run.collection.error : run.publication.error) ?? null } : error ? { error } : {};
@@ -253,6 +281,9 @@ export async function main(args = process.argv.slice(2), executors?: ExecutorSou
     if (jsonOutput) process.stdout.write(`${JSON.stringify({ schema: "ultrafuzz.error.v2", error: message })}\n`);
     else process.stderr.write(`Error: ${message}\n`);
     process.exitCode = 1;
+  } finally {
+    const exit = end ?? (import.meta.main ? exitFlushed : undefined);
+    if (exit) await endHeldProcess(ran, exit);
   }
 }
 

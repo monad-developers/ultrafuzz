@@ -171,6 +171,44 @@ describe("worker execution contract", () => {
     expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual([`-f ${root}`, root, `-f ${root}`, root]);
     expect(readFileSync(join(raw, "worker.log"), "utf8")).not.toContain("Unable to synchronize");
   }, 20_000);
+  test("a redaction pass that reaches its time limit stops before the next file, and the record says so", async () => {
+    const secret = "test-secret-never-publish";
+    const { root, job } = await stubRun(`printf '${secret}\\n' > 'RAW/a-first.txt'; printf '${secret}\\n' > 'RAW/z-last.txt'; echo '# Report' > 'RAW/report.md'`);
+    const script = join(root, "bin/opencode"), raw = join(job.output_dir, "raw"), first = join(raw, "a-first.txt");
+    writeFileSync(script, readFileSync(script, "utf8").replaceAll("RAW", raw));
+    fakeSync(root, 0.2);
+    // The time limit of the pass comes while the pass works on its first file with the key: from the moment at which that
+    // file is replaced, the clock is two hours later. The deadline of the run is one hour away, so the pass starts in time.
+    const clock = Date.now;
+    let late = false;
+    Date.now = () => clock() + ((late ||= existsSync(first) && readFileSync(first, "utf8").includes("[REDACTED]")) ? 2 * 3600_000 : 0);
+    let record;
+    try { record = await runWorker(root); } finally { Date.now = clock; }
+    expect(late).toBe(true);
+    expect(record).toMatchObject({ state: "finished", status: "succeeded", end: "completed" });
+    // The file in work was completed and counted. The pass did not go on to the files after it, also not during the syncs at the end.
+    expect(readFileSync(first, "utf8")).toBe("[REDACTED]\n");
+    expect(readFileSync(join(raw, "z-last.txt"), "utf8")).toBe(`${secret}\n`);
+    expect(record.redactions).toBe(1);
+    expect(record.omitted).toContainEqual({ path: ".", reason: "Worker redaction pass stopped at the time limit; the collector redacts again before it packages" });
+    expect(readFileSync(join(raw, "worker.log"), "utf8")).toContain("Output redaction stopped at the time limit.");
+    expect(record.collection.state).toBe("pending");
+    expect(JSON.parse(readFileSync(join(root, "complete.json"), "utf8"))).toEqual(record);
+  });
+  test("an agents directory that cannot be exported is one omitted entry, and the workspace export continues", async () => {
+    // A file stands where the copy of the agents directory goes.
+    const { root, job } = await stubRun("mkdir -p agents; echo plan > agents/plan.md; echo changed > new.sol; echo block > 'RAW/agents'; echo '# Report' > 'RAW/report.md'");
+    const script = join(root, "bin/opencode"), raw = join(job.output_dir, "raw"); writeFileSync(script, readFileSync(script, "utf8").replaceAll("RAW", raw));
+    fakeSync(root);
+    const record = await runWorker(root);
+    expect(record.status).toBe("succeeded");
+    expect(record.omitted.filter(item => /^raw\/(agents|workspace)/.test(item.path))).toEqual([{ path: "raw/agents", reason: "Export incomplete; the workspace stays in the run store" }]);
+    expect(readFileSync(join(raw, "worker.log"), "utf8")).toContain("Export of the agents directory incomplete; it remains in the run store:");
+    expect(readFileSync(join(raw, "agents"), "utf8")).toBe("block\n");
+    expect(readFileSync(join(raw, "workspace/agents/plan.md"), "utf8")).toBe("plan\n");
+    expect(readFileSync(join(raw, "workspace/new.sol"), "utf8")).toBe("changed\n");
+    expect(JSON.parse(readFileSync(join(root, "complete.json"), "utf8"))).toEqual(record);
+  });
   test("a cancelled worker ends itself when the grace period is over", async () => {
     const stuck = await stubRun("trap 'sleep 1; exit 0' TERM; touch 'READY'; sleep 20 & wait");
     const script = join(stuck.root, "bin/opencode"), ready = join(stuck.root, "ready"); writeFileSync(script, readFileSync(script, "utf8").replace("READY", ready));

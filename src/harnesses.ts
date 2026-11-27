@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, lstatSync, writeFileSync, cpSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -48,14 +47,6 @@ export function* files(directory: string): Generator<string> {
     if (stat.isDirectory()) yield* files(file);
     else if (stat.isFile()) yield file;
   }
-}
-export function profileDigest(directory: string): string {
-  const hash = createHash("sha256");
-  for (const path of files(directory)) {
-    const name = path.slice(directory.length + 1), bytes = readFileSync(path);
-    hash.update(`${name}\0${bytes.length}\0`).update(bytes);
-  }
-  return hash.digest("hex");
 }
 function write(path: string, value: string): void {
   mkdirSync(dirname(path), { recursive: true });

@@ -6,6 +6,7 @@ import { initWorkspace } from "../src/config";
 import { LOST_AFTER, WATCH_ATTEMPTS, createEngine, settled, type WatchOptions } from "../src/engine";
 import { LaunchNotStarted, type Executor, type Observation } from "../src/executor";
 import { dockerInstructions } from "../src/modal";
+import { ResultsMerged } from "../src/publish";
 import { readRun, writeRun } from "../src/store";
 import type { Config, ExecutorName, RunRecord } from "../src/types";
 
@@ -92,13 +93,14 @@ async function fixture(options: { defaults?: string; tables?: string; results?: 
   // One fake per executor name. `cloud` is the Docker one, the default.
   const clouds: Record<ExecutorName, Cloud> = { docker: new Cloud(home), modal: new Cloud(home) };
   const cloud = clouds.docker, requested: ExecutorName[] = [];
-  let attempts = 0, fail = false;
+  let attempts = 0, fail: boolean | Error = false;
   const engine = await createEngine(home, async name => { requested.push(name); return clouds[name]; }, async record => {
     attempts++;
-    if (fail) throw new Error("Simulated publication failure");
+    if (fail) throw fail === true ? new Error("Simulated publication failure") : fail;
     return { pr_url: `https://github.com/owner/private-results/pull/${record.id}` };
   });
-  return { home, source, cloud, modal: clouds.modal, engine, requested, attempts: () => attempts, publicationFailure: (value: boolean) => { fail = value; } };
+  // `publicationFailure(error)` makes the publisher fail with that error.
+  return { home, source, cloud, modal: clouds.modal, engine, requested, attempts: () => attempts, publicationFailure: (value: boolean | Error) => { fail = value; } };
 }
 
 test("detached collection retries publication, serializes collectors and recovers local records", async () => {
@@ -118,6 +120,9 @@ test("detached collection retries publication, serializes collectors and recover
   publicationFailure(false);
   const records = await Promise.all([engine.status(run.id), engine.status(run.id)]);
   expect(records.every(record => record.publication.state === "published")).toBe(true);
+  // The cause of the failed attempt is gone. A published run with a cause is a run that was not published again.
+  expect(failed.publication.error).toBe("Simulated publication failure");
+  expect(records.map(record => record.publication.error)).toEqual([undefined, undefined]);
   expect(attempts()).toBe(2);
   // The retry published the local package; it did not download again.
   expect(cloud.downloads).toBe(1);
@@ -962,6 +967,39 @@ test("a launch that left nothing on the executor ends at once, and later command
   expect(await engine.status(unsure.message.match(/Run (\S+):/)![1]!)).toMatchObject({ state: "launching", end: null, error: "connection reset", collection: { state: "pending" } });
 });
 
+test("the result of a launch drops each mark of a lost verdict that a poll made during the launch", async () => {
+  const { home, cloud, engine } = await fixture({ results: false });
+  cloud.observation = { code: undefined, complete: null };
+  // The submission takes 31 minutes. A poll ends the run as lost, and the record gets the mark of a run without a completion record.
+  const poll = async (record: RunRecord) => {
+    setSystemTime(new Date(Date.now() + 31 * 60_000));
+    let lost!: RunRecord;
+    await stderrLines(async () => { lost = await engine.status(record.id); });
+    expect(lost).toMatchObject({ state: "finished", end: "lost", unrecorded: true });
+    // No poll of a launching run writes the time of the first "unknown" answer. It is written here by hand: the launch must not keep it all the same.
+    await writeRun(home, { ...lost, unknown_since: lost.finished_at! });
+  };
+  // The platform accepted the run.
+  cloud.onLaunch = poll;
+  const accepted = await engine.launch({ repository: "example", label: "accepted" });
+  expect(accepted).toMatchObject({ state: "running", end: null, executor: { runtime_id: `sb-${accepted.id}` } });
+  expect([accepted.error, accepted.unrecorded, accepted.unknown_since]).toEqual([undefined, undefined, undefined]);
+  expect(await readRun(home, accepted.id)).toEqual(accepted);
+
+  // The launch failed, and the executor is sure that nothing of the run is left.
+  cloud.onLaunch = async record => { await poll(record); throw new LaunchNotStarted(new Error("upload failed")); };
+  const failure = await engine.launch({ repository: "example", label: "refused" }).then(() => new Error("the launch did not fail"), error => error as Error);
+  const id = failure.message.match(/Run (\S+):/)![1]!;
+  const failed = await readRun(home, id);
+  expect(failed).toMatchObject({ state: "finished", end: "error", error: "upload failed", collection: { state: "collected", path: null, report: null } });
+  expect([failed.unrecorded, failed.unknown_since]).toEqual([undefined, undefined]);
+  expect(settled(failed)).toBe(true);
+  // Such a run is final: a later status does not ask the executor again.
+  const asked = cloud.observations;
+  expect(await engine.status(id)).toEqual(failed);
+  expect(cloud.observations).toBe(asked);
+});
+
 test("a status call that is in flight when a launch writes its result does not write the old record back", async () => {
   const { home, cloud, engine } = await fixture({ results: false });
   // The poll reads the record in the state "launching" and waits for the executor. The launch ends in that time.
@@ -1091,6 +1129,43 @@ test("a run that ended without a completion record is asked about again, and a w
   cloud.finish(alive.id, "# Report");
   expect(await engine.status(alive.id)).toMatchObject({ state: "finished", status: "succeeded", end: "completed", collection: { state: "collected" } });
 
+  // A run was recorded as lost with the wrong credentials, and its collection failed. With the right ones the
+  // executor has the runtime, which ended with a code and without a record. The run was not lost.
+  const dead = await engine.launch({ repository: "example", label: "dead" });
+  cloud.observation = { code: undefined, complete: null };
+  cloud.downloadFailure = "Docker volume was not found";
+  let lost!: RunRecord;
+  await stderrLines(async () => {
+    const doubt = await engine.status(dead.id);
+    setSystemTime(new Date(Date.parse(doubt.unknown_since!) + LOST_AFTER + 1000));
+    lost = await engine.status(dead.id);
+  });
+  setSystemTime();
+  expect(lost).toMatchObject({ state: "finished", end: "lost", exit_code: null, unrecorded: true, collection: { state: "failed" } });
+  expect(Date.parse(lost.unknown_since!)).toBeGreaterThan(0);
+  cloud.observation = { code: 137, runtime_id: "sb-found", complete: null }; cloud.downloadFailure = undefined;
+  const downloads = cloud.downloads;
+  let corrected!: RunRecord;
+  expect(await stderrLines(async () => { corrected = await engine.status(dead.id); })).toEqual([`Run ${dead.id}: the docker executor knows this run again. It ended with code 137 and without a completion record. The record of its end (lost) is corrected.\n`]);
+  expect(corrected).toMatchObject({ state: "finished", status: "failed", end: "error", exit_code: 137, unrecorded: true, executor: { runtime_id: "sb-found" }, collection: { state: "collected", report: null } });
+  expect(corrected.unknown_since).toBeUndefined();
+  expect(corrected.finished_at).toBe(lost.finished_at);
+  expect(cloud.downloads).toBe(downloads + 1);
+  // The same answer again changes nothing and writes nothing.
+  expect(await stderrLines(async () => { expect(await engine.status(dead.id)).toEqual(corrected); })).toEqual([]);
+  expect(cloud.downloads).toBe(downloads + 1);
+  // An executor that still does not know the run leaves a lost run as lost.
+  const still = await engine.launch({ repository: "example", label: "still" });
+  cloud.observation = { code: undefined, complete: null };
+  await stderrLines(async () => {
+    const doubt = await engine.status(still.id);
+    setSystemTime(new Date(Date.parse(doubt.unknown_since!) + LOST_AFTER + 1000));
+    const verdict = await engine.status(still.id);
+    expect(await engine.status(still.id)).toEqual(verdict);
+    expect(verdict).toMatchObject({ end: "lost", exit_code: null });
+  });
+  setSystemTime();
+
   // An executor that cannot be asked does not fail the status of a run that has ended. The run stays as it is.
   const gone = await engine.launch({ repository: "example", label: "gone" });
   cloud.observation = { code: 137, complete: null };
@@ -1102,6 +1177,59 @@ test("a run that ended without a completion record is asked about again, and a w
     expect(await stderrLines(async () => { same = await engine.status(gone.id); })).toEqual([`Run ${gone.id}: the docker executor could not be asked again for the completion record (The docker command was not found.). The run stays as it is.\n`]);
     expect(same).toEqual(ended);
   } finally { cloud.observe = observe; }
+});
+
+test("a late completion record does not open the publication of a run whose pull request was merged", async () => {
+  const { home, cloud, engine, attempts, publicationFailure } = await fixture();
+  // The run ended without its record. It was collected and published, so it is settled.
+  const late = async (label: string) => {
+    const run = await engine.launch({ repository: "example", label, publish: true });
+    cloud.observation = { code: 124, runtime_id: `sb-${run.id}`, complete: null };
+    const first = await engine.status(run.id);
+    cloud.observation = undefined;
+    return first;
+  };
+  const first = await late("merged");
+  const url = `https://github.com/owner/private-results/pull/${first.id}`, artifacts = join(home, "runs", first.id, "artifacts");
+  expect(first).toMatchObject({ unrecorded: true, collection: { state: "collected" }, publication: { state: "published", pr_url: url } });
+  expect(settled(first)).toBe(true);
+  expect(attempts()).toBe(1);
+  // The pull request is merged. Then the record and the report show, so the new package differs from the merged files.
+  const merged = new ResultsMerged(first.id);
+  publicationFailure(merged);
+  cloud.finish(first.id, "# Report\nWritten before the stop.");
+  let found!: RunRecord;
+  expect(await stderrLines(async () => { found = await engine.status(first.id); })).toEqual([
+    `Run ${first.id}: the completion record is there now. The run is collected again.\n`,
+    `Run ${first.id}: the pull request of this run was merged (${url}), and the new package differs from the merged files. The merged files stay as they are. The new package is on this machine only: ${artifacts}\n`,
+  ]);
+  // The new package is collected. The publication stays closed, with the reason, and the run stays settled.
+  expect(found).toMatchObject({ status: "succeeded", end: "completed", collection: { state: "collected", report: join(artifacts, "raw/report.md") }, publication: { state: "published", pr_url: url, error: merged.message } });
+  expect(settled(found)).toBe(true);
+  expect([attempts(), cloud.downloads]).toEqual([2, 2]);
+  // No later command asks the publisher again, and a watch without IDs does not take the run.
+  expect(await stderrLines(async () => { expect(await engine.status(first.id)).toEqual(found); expect(await engine.collect(first.id)).toEqual(found); })).toEqual([]);
+  expect((await watching(engine)).rows).toEqual([]);
+  expect(attempts()).toBe(2);
+  // A forced collection gets the same answer and leaves the run settled.
+  const forced = await stderrLines(async () => { expect(settled(await engine.collect(first.id, true))).toBe(true); });
+  expect(forced).toHaveLength(1);
+  expect(forced[0]).toContain("the pull request of this run was merged");
+
+  // Each other failure of the publisher is a failed publication, as before, and the next attempt can close it.
+  publicationFailure(false);
+  const other = await late("other");
+  publicationFailure(true);
+  cloud.finish(other.id, "# Report");
+  await stderrLines(async () => { expect((await engine.status(other.id)).publication).toMatchObject({ state: "failed", error: "Simulated publication failure", pr_url: `https://github.com/owner/private-results/pull/${other.id}` }); });
+  publicationFailure(new ResultsMerged(other.id));
+  await stderrLines(async () => { expect(settled(await engine.status(other.id))).toBe(true); });
+
+  // A run that has no pull request yet was never published: the same answer is a failed publication.
+  publicationFailure(new ResultsMerged("never"));
+  const never = await engine.launch({ repository: "example", label: "never", publish: true });
+  cloud.finish(never.id, "# Report");
+  expect(await stderrLines(async () => { expect((await engine.status(never.id)).publication).toMatchObject({ state: "failed", pr_url: null }); })).toEqual([]);
 });
 
 test("a short value of an environment variable with KEY or TOKEN in its name does not change the package", async () => {

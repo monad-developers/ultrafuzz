@@ -383,7 +383,8 @@ export class DockerExecutor implements Executor {
     } catch (error) {
       // As on Modal: the run then ends as a run without a record, so the core can still collect its outputs. Every other error stays an error.
       if (!damaged(error)) throw error;
-      process.stderr.write(`The completion record of run ${record.id} cannot be used (${error.message}). The run is handled as a run without one.\n`);
+      // A run that the host has already ended got this line when it ended.
+      if (record.state !== "finished") process.stderr.write(`The completion record of run ${record.id} cannot be used (${error.message}). The run is handled as a run without one.\n`);
     }
     if (complete && complete.id !== record.id) throw new Error("Completion record belongs to another run");
     return { code, runtime_id: container?.id, complete };

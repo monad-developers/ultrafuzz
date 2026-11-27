@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { initWorkspace } from "../src/config";
 import { createEngine } from "../src/engine";
-import { LaunchNotStarted, WORKER_COMMAND } from "../src/executor";
+import { LaunchNotStarted, WORKER_COMMAND, unansweredRequests } from "../src/executor";
 import { readRun } from "../src/store";
 import type { Config, RunRecord, WorkerJob } from "../src/types";
 
@@ -702,11 +702,22 @@ describe("observe", () => {
     const hanging = new FakeModal();
     hanging.store(id, { "complete.json": finished() });
     const hung = hanging.worker();
-    hung.box.filesystem.stat = () => new Promise(() => {});
+    const pending: Array<(error: Error) => void> = [], open = unansweredRequests();
+    hung.box.filesystem.stat = () => new Promise((_answer, fail) => { pending.push(fail); });
     const started = Date.now();
     expect(await new ModalExecutor(() => hanging.client, packageRoot(), 0, "4000M", 50).observe({ ...hung.run, end: "cancelled" })).toEqual({ code: null, runtime_id: hung.box.sandboxId, complete: null });
     expect(Date.now() - started).toBeLessThan(5000);
     expect(hung.box.terminated).toEqual([]);
+    // The two looks, for the record and for the marker of the cancellation, are still open. They are counted, so a
+    // command that has printed its result can end the process. A look that ends later is not counted any more.
+    expect(pending).toHaveLength(2);
+    expect(unansweredRequests()).toBe(open + 2);
+    pending.shift()!(new Error("The sandbox has ended."));
+    await Bun.sleep(1);
+    expect(unansweredRequests()).toBe(open + 1);
+    pending.shift()!(new Error("The sandbox has ended."));
+    await Bun.sleep(1);
+    expect(unansweredRequests()).toBe(open);
 
     // A worker that has just written its record gets the time to exit by itself.
     const ending = world();
@@ -874,6 +885,8 @@ describe("observe", () => {
     expect(modal.lookups).toHaveLength(3);
     expect(modal.helpers()).toHaveLength(1);
     expectReader(modal.helpers()[0]!);
+    // No worker has ended, so there is no late commit to wait for: the store is not loaded again.
+    expect(modal.helpers()[0]!.reloads).toBe(0);
     // A completion record that is there is found at the first look.
     const done = world();
     done.modal.store(id, { "complete.json": finished() });
@@ -883,6 +896,29 @@ describe("observe", () => {
     known.modal.store(id);
     await notices(async () => { await known.executor.observe(run); await known.executor.observe(run); });
     expect(known.modal.helpers()).toHaveLength(2);
+    // A sandbox that Modal does not know gets one look for each answer, also without a record in the store.
+    expect(known.modal.helpers().map(box => box.reloads)).toEqual([0, 0]);
+  });
+
+  test("a run that the host has already ended gets one look at its store for each status, without the wait for a late commit", async () => {
+    const { modal, executor } = world();
+    const store = modal.store(id, { "run.json": record() });
+    const { box, run } = modal.worker(id, 124);
+    // The host ended the run without a completion record. Each later status asks again.
+    const ended: RunRecord = { ...run, state: "finished", status: "failed", end: "error", exit_code: 124, unrecorded: true };
+    for (let look = 0; look < 2; look++) expect(await executor.observe(ended)).toEqual({ code: 124, runtime_id: box.sandboxId, complete: null });
+    expect(modal.helpers().map(helper => helper.reloads)).toEqual([0, 0]);
+    for (const helper of modal.helpers()) expectReader(helper);
+    // A record that shows later is found by the one look of a later status.
+    writeFileSync(join(store, "complete.json"), JSON.stringify(finished()));
+    modal.commit(id);
+    expect(await executor.observe(ended)).toEqual({ code: 124, runtime_id: box.sandboxId, complete: finished() });
+    expect(modal.helpers()[2]!.reloads).toBe(0);
+    // The same run while the host still has it as running gets the wait: its worker has just ended.
+    const fresh = world();
+    fresh.modal.store(id, { "run.json": record() });
+    expect(await fresh.executor.observe(fresh.modal.worker(id, 124).run)).toMatchObject({ code: 124, complete: null });
+    expect(fresh.modal.helpers()[0]!.reloads).toBe(5);
   });
 
   test("a completion record of another run is rejected", async () => {
@@ -912,6 +948,8 @@ describe("observe", () => {
         expect(printed).toEndWith("The run is handled as a run without one.\n");
         expect(modal.helpers()[0]!.reloads).toBe(0);
         expectReader(modal.helpers()[0]!);
+        // A run that the host has already ended is asked again by each status. The line is not written again.
+        expect(await notices(async () => { expect(await executor.observe({ ...run, state: "finished" })).toEqual({ code: exit, runtime_id: box.sandboxId, complete: null }); })).toBe("");
       }
     }
 

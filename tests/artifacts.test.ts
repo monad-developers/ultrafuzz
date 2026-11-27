@@ -90,11 +90,17 @@ test("a redaction pass can be stopped before a file, replaces files whole and ke
   const { source } = await fixture();
   for (const name of ["a.txt", "b.txt", "c.txt"]) await writeFile(join(source, name), "known-secret\n");
   await chmod(join(source, "a.txt"), 0o644);
+  const inodes = async () => Promise.all(["a.txt", "b.txt", "c.txt", "prompt.txt"].map(async name => (await lstat(join(source, name))).ino));
+  const before = await inodes();
   // The pass is stopped when it comes to the third file. The files after it stay as they are.
   let asked = 0;
   expect(await redactDirectory(source, ["known-secret"], () => ++asked > 2)).toBe(2);
   expect(await Promise.all(["a.txt", "b.txt", "c.txt"].map(name => readFile(join(source, name), "utf8")))).toEqual(["[REDACTED]\n", "[REDACTED]\n", "known-secret\n"]);
   expect((await lstat(join(source, "a.txt"))).mode & 0o777).toBe(0o644);
+  // A changed file is a new file that took the place of the old one, so a reader never sees a file that is half written.
+  // A file that the pass did not change is the same file as before.
+  const after = await inodes();
+  expect(after.map((inode, index) => inode !== before[index])).toEqual([true, true, false, false]);
   // No temporary file is left, and a link at the name of the temporary file is not written through.
   expect((await readdir(source)).sort()).toEqual(["a.txt", "b.txt", "c.txt", "prompt.txt", "raw"]);
   const outside = join(source, "..", "outside.txt");

@@ -5,7 +5,7 @@ import { chmod, mkdir, readFile, readdir, readlink, rm, stat } from "node:fs/pro
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ModalClient, NotFoundError, SandboxFilesystemFileTooLargeError, SandboxFilesystemNotFoundError, type App, type Image, type Sandbox, type Volume } from "modal";
 import { c as createTar, t as listTar, x as extractTar, type ReadEntry } from "tar";
-import { LaunchNotStarted, RUN_ROOT, WORKER_COMMAND, stageRuntime, startingJob, storedRecord, type Executor, type Observation } from "./executor";
+import { LaunchNotStarted, RUN_ROOT, WORKER_COMMAND, stageRuntime, startingJob, storedRecord, unansweredRequest, type Executor, type Observation } from "./executor";
 import type { Config, ExecutorRecord, ModalConfig, RunRecord } from "./types";
 
 const ROOT = resolve(import.meta.dir, "..");
@@ -339,10 +339,11 @@ export class ModalExecutor implements Executor {
         const live = sandbox, age = async (name: string) => {
           // The SDK waits without a limit when the sandbox ends under this call, so the look has its own limit.
           // A look that fails or takes too long counts as "no file": a sandbox is never stopped because of it.
-          let timer: ReturnType<typeof setTimeout> | undefined;
+          // The request stays open after its limit. It is recorded, so a command that has printed its result can end the process.
+          let timer: ReturnType<typeof setTimeout> | undefined, answered: (() => void) | undefined;
           const info = await Promise.race([
-            live.filesystem.stat(`${RUN_ROOT}/${name}`).catch(() => null),
-            new Promise<null>(done => { timer = setTimeout(() => done(null), this.look); }),
+            live.filesystem.stat(`${RUN_ROOT}/${name}`).catch(() => null).finally(() => answered?.()),
+            new Promise<null>(done => { timer = setTimeout(() => { answered = unansweredRequest(); done(null); }, this.look); }),
           ]).finally(() => clearTimeout(timer));
           return info ? Date.now() / 1000 - info.modifiedTime : 0;
         };
@@ -360,14 +361,16 @@ export class ModalExecutor implements Executor {
             catch (error) {
               // The run then ends as a run without a record, so the core can still collect its outputs. Every other error can pass, and stays an error.
               if (!damaged(error)) throw error;
-              process.stderr.write(`The completion record of run ${record.id} cannot be used (${error.message}). The run is handled as a run without one.\n`);
+              // A run that the host has already ended got this line when it ended.
+              if (record.state !== "finished") process.stderr.write(`The completion record of run ${record.id} cannot be used (${error.message}). The run is handled as a run without one.\n`);
               break;
             }
             // A worker that has ended can have written the record: Modal commits the Volume when the sandbox ends, and a new
             // mount does not always show that commit at once. So the look is repeated a few times. This is a wait, not a
             // proof: a worker that was killed wrote no record, and the look then ends without one. A launch without a
-            // sandbox, or a sandbox that Modal does not know, gets one look only.
-            if (found || code === undefined || attempt === 5) break;
+            // sandbox, or a sandbox that Modal does not know, gets one look only. So does a run that the host has
+            // already ended: the wait was made when it ended, and each later status would make it again.
+            if (found || code === undefined || record.state === "finished" || attempt === 5) break;
             await Bun.sleep(this.settle);
             await reader.reloadVolumes().catch(() => undefined);
           }

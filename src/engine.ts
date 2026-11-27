@@ -6,7 +6,7 @@ import { listRuns, readRun, updateRun, withRunOperation, writeRun } from "./stor
 import { loadProfile, renderPrompt, stageProfile } from "./profiles";
 import { prepareSource, prepareDependency, stageInputs } from "./source";
 import { environmentSecrets as knownSecrets, prepareArtifacts, redactText } from "./artifacts";
-import { publishRun } from "./publish";
+import { ResultsMerged, publishRun } from "./publish";
 import { LaunchNotStarted, RUN_ROOT, executorRecord, loadExecutor, type Executor, type ExecutorSource, type Observation } from "./executor";
 import { EXECUTORS, HARNESSES, VERSION, type ExecutorName, type LaunchOptions, type RunRecord, type WorkerJob } from "./types";
 
@@ -130,7 +130,14 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
         record.publication = { ...record.publication, state: "published", pr_url: published.pr_url };
         delete record.publication.error;
       } catch (error) {
-        record.publication = { ...record.publication, state: "failed", error: message(error) };
+        const url = record.publication.pr_url;
+        if (error instanceof ResultsMerged && url) {
+          // The run has its pull request, and that request was merged. This package is a new one, from a completion
+          // record that showed late or from a forced collection, and it differs from the merged files. Merged results
+          // are never changed, so no new attempt can work. The publication stays closed, and the run can settle.
+          record.publication = { ...record.publication, state: "published", error: message(error) };
+          process.stderr.write(`Run ${id}: the pull request of this run was merged (${url}), and the new package differs from the merged files. The merged files stay as they are. The new package is on this machine only: ${artifacts}\n`);
+        } else record.publication = { ...record.publication, state: "failed", error: message(error) };
       }
     }
     // Observation/collection operations share their own lock; registry locks are brief.
@@ -160,8 +167,21 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
       process.stderr.write(`Run ${id}: the ${record.executor.name} executor could not be asked again for the completion record (${message(error)}). The run stays as it is.\n`);
       return collectUnlocked(id);
     }
-    // The same answer as before: no record, and no runtime that is alive. Nothing changes.
-    if (ended && !observed.complete && observed.code !== null) return collectUnlocked(id);
+    if (ended && !observed.complete && observed.code !== null) {
+      // The run was ended as lost, and the executor now knows its runtime, which has ended. That verdict was wrong:
+      // the run ended with this code and without a record. Its outputs are in the store, so the collection is tried again.
+      const code = observed.code;
+      if (record.end === "lost" && code !== undefined) {
+        process.stderr.write(`Run ${id}: the ${record.executor.name} executor knows this run again. It ended with code ${code} and without a completion record. The record of its end (lost) is corrected.\n`);
+        await updateRun(home, id, current => {
+          if (current.state !== "finished" || current.end !== "lost") return current;
+          const { unknown_since: _unknown, ...known } = current;
+          return { ...known, end: "error", exit_code: code, last_observed_at: now(), executor: { ...known.executor, runtime_id: observed.runtime_id ?? known.executor.runtime_id } };
+        });
+      }
+      // In every other case this is the same answer as before: no record, and no runtime that is alive. Nothing changes.
+      return collectUnlocked(id);
+    }
     const cancelled = record.end === "cancelled", previouslyUnknown = !!record.unknown_since;
     if (observed.code !== undefined || observed.complete) { delete record.unknown_since; warned.delete(id); }
     if (observed.complete) {

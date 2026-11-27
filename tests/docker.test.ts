@@ -499,6 +499,8 @@ describe("observe", () => {
       const printed = await notices(async () => { expect(await executor.observe(run)).toEqual({ code: 1, runtime_id: containerId, complete: null }); });
       expect(printed).toStartWith(`The completion record of run ${id} cannot be used (${reason}`);
       expect(printed).toEndWith("The run is handled as a run without one.\n");
+      // A run that the host has already ended is asked again by each status. The line is not written again.
+      expect(await notices(async () => { expect(await executor.observe({ ...run, state: "finished" })).toEqual({ code: 1, runtime_id: containerId, complete: null }); })).toBe("");
       // The same through a reader container, after the container of the run was removed.
       docker.containers.clear();
       expect(await notices(async () => { expect((await executor.observe(run)).complete).toBeNull(); })).toContain("cannot be used");
@@ -665,6 +667,12 @@ describe("recover", () => {
     // A record of another run or another executor in a labelled volume is not returned.
     docker.store.set(`ultrafuzz-${id}:/run-data/complete.json`, fileArchive("complete.json", record({}, other)));
     expect(await executor.recover(config)).toEqual([]);
+    expect(docker.containers.size).toBe(0);
+    // A failure of Docker itself is not an unreadable store: a full scan fails, and no volume is skipped.
+    docker.failing.set("cp", { code: 1, stderr: "Error response from daemon: driver failed" });
+    let failure: unknown;
+    expect(await notices(async () => { failure = await executor.recover(config).then(() => undefined, error => error); })).toBe("");
+    expect(String(failure)).toContain("driver failed");
     expect(docker.containers.size).toBe(0);
   });
 });
