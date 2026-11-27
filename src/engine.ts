@@ -287,6 +287,8 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
           const time = Date.now(), locked = (error as NodeJS.ErrnoException).code === "ELOCKED";
           failingSince ??= time;
           brokenSince = locked ? null : brokenSince ?? time;
+          // A busy poll ends a row of other failures: the next such failure starts a new row with a new count, and gets a new line.
+          if (locked) brokenLine = false;
           // The last line names the run and the cause.
           if (time - failingSince >= busy || (brokenSince !== null && time - brokenSince >= patience)) throw new Error(failure(id, error));
           if (locked && time - busyLineAt >= 10 * 60_000) {
@@ -490,7 +492,7 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
           // The snapshot is not the whole tree of the commit. A build that needs one of these files can fail, so the record and one line say what is absent.
           const reason = "tracked path left out of the source snapshot: it has the name of a credential store or a cache";
           record.omitted.push(...source.excluded.slice(0, 50).map(path => ({ path: `source/${path}`, reason })));
-          if (source.excluded.length > 50) record.omitted.push({ path: "source", reason: `${source.excluded.length - 50} more tracked paths were left out of the source snapshot and are not listed` });
+          if (source.excluded.length > 50) record.omitted.push({ path: "source", reason: source.excluded.length === 51 ? "1 more tracked path was left out of the source snapshot and is not listed" : `${source.excluded.length - 50} more tracked paths were left out of the source snapshot and are not listed` });
           process.stderr.write(`Run ${id}: the source snapshot leaves out ${source.excluded.length} tracked ${source.excluded.length === 1 ? "path" : "paths"} with the name of a credential store or a cache (${source.excluded.slice(0, 5).join(", ")}${source.excluded.length > 5 ? ", ..." : ""}). The run record lists them in omitted.\n`);
         }
         await cp(source.archive, join(stage, "source.tar.gz"));

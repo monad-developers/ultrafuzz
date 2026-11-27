@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { Header, c as createTar, t as listTar, x as extractTar, type HeaderData } from "tar";
@@ -626,6 +626,61 @@ describe("download", () => {
     for (const path of listing(home)) expect(lstatSync(join(home, path)).isSymbolicLink()).toBe(false);
   });
 
+  test("the copies of hard-linked names get at most as many bytes as the archive has, and the other names are omitted", async () => {
+    const { docker, executor } = setup(), run = record({ state: "finished" });
+    const destination = join(scratch(), "collected");
+    // One file of 1 MiB with 40 more names, as `cp -al` of a corpus leaves them, and then a small file with a second name.
+    const names = Array.from({ length: 40 }, (_, index) => `raw/copy-${String(index).padStart(2, "0")}.bin`);
+    const bytes = archive(
+      entry({ path: "outputs/", type: "Directory" }),
+      entry({ path: "outputs/raw/", type: "Directory" }),
+      entry({ path: "outputs/raw/big.bin" }, "x".repeat(1024 * 1024)),
+      entry({ path: "outputs/raw/note.md" }, "note\n"),
+      ...names.map(name => entry({ path: `outputs/${name}`, type: "Link", linkpath: "outputs/raw/big.bin" })),
+      entry({ path: "outputs/raw/second-note.md", type: "Link", linkpath: "outputs/raw/note.md" }),
+    );
+    docker.finished(run, null, bytes);
+    const omitted = await executor.download(run, destination);
+    // The archive is a little larger than 1 MiB, so one copy of the large file fits. The limit counts bytes, not
+    // names: the small file, which comes later, still gets its copy.
+    expect(listing(destination)).toEqual(["raw/", "raw/big.bin", "raw/copy-00.bin", "raw/note.md", "raw/second-note.md"]);
+    expect(readFileSync(join(destination, "raw/second-note.md"), "utf8")).toBe("note\n");
+    expect(lstatSync(join(destination, "raw/copy-00.bin")).size).toBe(1024 * 1024);
+    // Each name without a copy is in the list, with the cause.
+    expect(omitted).toEqual(names.slice(1).map(path => ({ path, reason: "hard link excluded: the copies of hard-linked files reached their size limit; the original stays in the Docker volume" })));
+    // The download never writes more than twice the size of the archive.
+    const written = listing(destination).filter(path => !path.endsWith("/")).reduce((sum, path) => sum + lstatSync(join(destination, path)).size, 0);
+    expect(written).toBeLessThanOrEqual(2 * bytes.length);
+  });
+
+  test("the read of a record never makes a copy for a link entry", async () => {
+    const { docker, root } = setup(), run = record();
+    docker.finished(run, null, undefined, 1);
+    // A record that is a directory, with two files and a second name for each of them. One file is empty: its copy
+    // has no bytes, so a limit of bytes does not stop it.
+    docker.store.set(`ultrafuzz-${id}:/run-data/complete.json`, archive(
+      entry({ path: "complete.json/", type: "Directory" }),
+      entry({ path: "complete.json/a" }, "x".repeat(4096)),
+      entry({ path: "complete.json/empty" }),
+      entry({ path: "complete.json/window/b", type: "Link", linkpath: "complete.json/a" }),
+      entry({ path: "complete.json/window/c", type: "Link", linkpath: "complete.json/empty" }),
+    ));
+    // The read unpacks in a private directory and removes it. So the test puts a link to a directory of its own
+    // there, at the place of the second name: a copy would be written through it, and would stay.
+    const outside = scratch();
+    const runner: DockerRunner = async (args, options) => {
+      const result = await docker.runner(args, options);
+      if (args[0] === "cp") {
+        const files = join(dirname(options!.output!), "files/complete.json");
+        mkdirSync(files, { recursive: true }); symlinkSync(outside, join(files, "window"));
+      }
+      return result;
+    };
+    const printed = await notices(async () => { expect(await new DockerExecutor(runner, root).observe(run)).toEqual({ code: 1, runtime_id: containerId, complete: null }); });
+    expect(printed).toContain("cannot be used (Invalid stored run record)");
+    expect(readdirSync(outside)).toEqual([]);
+  });
+
   test("a store without outputs gives an empty directory", async () => {
     const { docker, executor } = setup(), run = record({ state: "finished" }), destination = join(scratch(), "collected");
     docker.finished(run, null);
@@ -769,6 +824,20 @@ describe("the real command runner", () => {
     const endless = await client("exec yes")([], { output, limit: 100_000 });
     expect(endless).toMatchObject({ code: 1, overflow: true });
     expect(lstatSync(output).size).toBeLessThanOrEqual(100_000);
+  });
+  test("a chunk that one call writes only in part is written to its end", async () => {
+    const directory = scratch(), input = join(directory, "in.bin"), output = join(directory, "out.bin");
+    const bytes = Buffer.from(Array.from({ length: 200_000 }, (_, index) => index % 251));
+    writeFileSync(input, bytes);
+    const path = join(directory, "client");
+    writeFileSync(path, "#!/bin/sh\ncat\n", { mode: 0o755 });
+    // The system can write a part of a chunk only. Here one call writes 1000 bytes at most.
+    let calls = 0;
+    const short = commandRunner(path, (file, chunk, offset) => { calls++; return writeSync(file, chunk, offset, Math.min(1000, chunk.length - offset)); });
+    expect(await short([], { input, output, limit: 300_000 })).toEqual({ code: 0, stdout: "", stderr: "" });
+    // Each byte is in the file, in its place.
+    expect(readFileSync(output).equals(bytes)).toBe(true);
+    expect(calls).toBeGreaterThanOrEqual(200);
   });
   test("a write error of the output file is an error of this machine, not a command that printed too much", async () => {
     // 64 KiB is far below the limit. The device has no space, as a full temporary directory.

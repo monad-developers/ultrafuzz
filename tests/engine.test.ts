@@ -349,8 +349,26 @@ test("wait keeps polling after a failed status call and gives up only after a lo
     await expect(engine.wait(mixed.id, { interval: 1 })).rejects.toThrow(`Run ${mixed.id}: `);
     // No row of other failures reaches 10 minutes, so the 2 hours of failed polls end the wait: poll 21 is 120 minutes after poll 1.
     expect(polls).toBe(21);
-    // One line for the row of failed polls, and one for the lock each ten minutes.
-    expect(lines.filter(line => line.includes("the status check failed"))).toEqual([`Run ${mixed.id}: the status check failed (failure 1). Still waiting; this command tries again for up to 10 minutes.\n`]);
+    // Each busy poll ends a row of other failures, so each failure here is a row of its own and gets its line: polls 1, 3, ... 19.
+    // Poll 21 ends the wait. The lock gets one line each ten minutes.
+    expect(lines.filter(line => line.includes("the status check failed"))).toEqual(Array.from({ length: 10 }, (_, index) => `Run ${mixed.id}: the status check failed (failure ${2 * index + 1}). Still waiting; this command tries again for up to 10 minutes.\n`));
+    expect(lines.filter(line => line.includes("another command is working on this run"))).toHaveLength(10);
+    // A row of failures after a busy poll gets a new line, so the wait does not end ten minutes later without a word.
+    const again = await engine.launch({ repository: "example", label: "again" });
+    lines.length = 0; polls = 0;
+    engine.status = async () => {
+      if (++polls > 100) return ended(again);
+      setSystemTime(new Date(Date.now() + 3 * 60_000));
+      throw polls === 2 ? Object.assign(new Error("Lock file is already being held"), { code: "ELOCKED" }) : new Error(`failure ${polls}`);
+    };
+    // Poll 1 fails, poll 2 finds the lock busy, and polls 3 to 7 fail: poll 7 is the first that is 10 minutes or more after poll 3.
+    await expect(engine.wait(again.id, { interval: 1 })).rejects.toThrow(`Run ${again.id}: the status check failed (failure 7).`);
+    expect(polls).toBe(7);
+    expect(lines).toEqual([
+      `Run ${again.id}: the status check failed (failure 1). Still waiting; this command tries again for up to 10 minutes.\n`,
+      `Run ${again.id}: another command is working on this run. Still waiting; this command tries again for up to 120 minutes.\n`,
+      `Run ${again.id}: the status check failed (failure 3). Still waiting; this command tries again for up to 10 minutes.\n`,
+    ]);
     engine.status = status;
 
     // A success between failures starts the count again. Failures only, for the whole time, end the wait with the last error.
@@ -1403,6 +1421,28 @@ test("tracked paths that the source snapshot leaves out are in the record and in
   await rm(join(source, ".npmrc")); await rm(join(source, "packages"), { recursive: true });
   for (const args of [["add", "-A", "."], ["-c", "commit.gpgsign=false", "commit", "-qm", "plain"]]) expect(await Bun.spawn(["git", ...args], { cwd: source, stdout: "ignore", stderr: "pipe" }).exited).toBe(0);
   expect(await stderrLines(async () => { expect((await engine.launch({ repository: "example", label: "plain" })).omitted).toEqual([]); })).toEqual([]);
+});
+
+test("the record lists 50 tracked paths that the snapshot leaves out at most, and then one entry with the count of the rest", async () => {
+  const { source, engine } = await fixture({ results: false });
+  const commit = async (text: string) => { for (const args of [["add", "-f", "."], ["-c", "commit.gpgsign=false", "commit", "-qm", text]]) expect(await Bun.spawn(["git", ...args], { cwd: source, stdout: "ignore", stderr: "pipe" }).exited).toBe(0); };
+  const paths = Array.from({ length: 51 }, (_, index) => `packages/p${String(index + 1).padStart(2, "0")}/.env`);
+  const reason = "tracked path left out of the source snapshot: it has the name of a credential store or a cache";
+  const launch = async (label: string) => { let run!: RunRecord; const lines = await stderrLines(async () => { run = await engine.launch({ repository: "example", label }); }); return { run, lines }; };
+  // 50 paths: each one is listed, and there is no entry for a rest.
+  for (const path of paths.slice(0, 50)) { await mkdir(join(source, path, ".."), { recursive: true }); await writeFile(join(source, path), "RPC_URL=http://localhost:8545\n"); }
+  await commit("fifty");
+  const full = await launch("fifty");
+  expect(full.run.omitted).toEqual(paths.slice(0, 50).map(path => ({ path: `source/${path}`, reason })));
+  // 51 paths: the first 50 are listed, and one more entry gives the number of paths that are not.
+  await mkdir(join(source, paths[50]!, ".."), { recursive: true }); await writeFile(join(source, paths[50]!), "RPC_URL=http://localhost:8545\n");
+  await commit("fifty-one");
+  const { run, lines } = await launch("fifty-one");
+  expect(run.omitted).toHaveLength(51);
+  expect(run.omitted.slice(0, 50)).toEqual(paths.slice(0, 50).map(path => ({ path: `source/${path}`, reason })));
+  expect(run.omitted[50]).toEqual({ path: "source", reason: expect.stringMatching(/^1 more tracked path.* left out of the source snapshot and .* not listed$/) });
+  // The launch line counts all 51 and names the first five.
+  expect(lines).toEqual([`Run ${run.id}: the source snapshot leaves out 51 tracked paths with the name of a credential store or a cache (${paths.slice(0, 5).join(", ")}, ...). The run record lists them in omitted.\n`]);
 });
 
 test("a short value of an environment variable with KEY or TOKEN in its name does not change the package", async () => {

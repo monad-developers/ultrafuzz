@@ -53,7 +53,8 @@ export type DockerRunner = (args: string[], options?: DockerOptions) => Promise<
 
 const tail = (text: string, limit: number) => text.length > limit ? text.slice(-limit) : text;
 
-export function commandRunner(binary = "docker"): DockerRunner {
+/** `write` writes a chunk from `offset` to an open file and returns the number of bytes that it wrote. A test replaces it. */
+export function commandRunner(binary = "docker", write: (file: number, chunk: Buffer, offset: number) => number = writeSync): DockerRunner {
   return (args, options = {}) => new Promise((resolvePromise, reject) => {
     const files: number[] = [];
     const open = (path: string | undefined, flags: string) => {
@@ -85,7 +86,7 @@ export function commandRunner(binary = "docker"): DockerRunner {
       if (overflow || unwritten) return;
       if (written + chunk.length > limit) { overflow = true; child.kill("SIGKILL"); return; }
       // One call can write a part of the chunk only.
-      try { for (let offset = 0; offset < chunk.length;) offset += writeSync(bounded!, chunk, offset); written += chunk.length; }
+      try { for (let offset = 0; offset < chunk.length;) offset += write(bounded!, chunk, offset); written += chunk.length; }
       catch (error) {
         // A write error of this machine, such as a full disk, is not the limit: the output is not too large. The error
         // has no code, so a caller cannot take it for a command that was not found.
@@ -139,9 +140,11 @@ async function checkStaging(directory: string, root = directory): Promise<void> 
  * must be that file or directory, or lie below it. Only regular files and directories are written, with
  * fixed modes and the current user as owner. No link is ever created, so a link in the volume cannot
  * redirect a later write. Docker stores the second name of a hard-linked file as a link entry. Such a name gets a
- * copy of the file, as a new regular file, when this archive held the file. Everything else is returned as omitted.
+ * copy of the file, as a new regular file, when this archive held the file. A link entry is small and its copy is a
+ * whole file, so the copies have a limit: together they get at most as many bytes as the archive has. With
+ * `copyLinks` false, no link entry gets a copy. Everything else is returned as omitted.
  */
-export async function unpack(archive: string, destination: string, top: string, strip: 0 | 1): Promise<RunRecord["omitted"]> {
+export async function unpack(archive: string, destination: string, top: string, strip: 0 | 1, copyLinks = true): Promise<RunRecord["omitted"]> {
   const omitted: RunRecord["omitted"] = [], foreign: string[] = [];
   // The regular files that this read wrote, and the hard-link entries, both as paths below the destination.
   const written = new Set<string>(), links: Array<{ path: string; target: string | null }> = [];
@@ -172,13 +175,16 @@ export async function unpack(archive: string, destination: string, top: string, 
     },
   });
   if (foreign.length) throw new Error(`Unexpected entry in the archive from Docker: ${foreign[0]}`);
+  // The bytes that the copies can still get. Without this limit, an archive of 1 MiB with 40 more names of one file writes 41 MiB.
+  let budget = copyLinks && links.length ? (await stat(archive)).size : 0;
   for (const link of links) {
     // The bytes are copied to a new regular file: no link is made. An existing path is never replaced.
-    const from = link.target !== null && written.has(link.target) ? join(destination, link.target) : null, to = join(destination, link.path);
-    const copied = from !== null && !!(await lstat(from).catch(() => null))?.isFile()
+    const from = copyLinks && link.target !== null && written.has(link.target) ? join(destination, link.target) : null, to = join(destination, link.path);
+    const info = from === null ? null : await lstat(from).catch(() => null), size = info?.isFile() ? info.size : null;
+    const copied = from !== null && size !== null && size <= budget
       && await mkdir(dirname(to), { recursive: true }).then(() => copyFile(from, to, constants.COPYFILE_EXCL)).then(() => chmod(to, 0o644)).then(() => true, () => false);
-    if (copied) written.add(link.path);
-    else omitted.push({ path: link.path, reason: "hard link excluded; the original stays in the Docker volume" });
+    if (copied) { written.add(link.path); budget -= size!; }
+    else omitted.push({ path: link.path, reason: size !== null && size > budget ? "hard link excluded: the copies of hard-linked files reached their size limit; the original stays in the Docker volume" : "hard link excluded; the original stays in the Docker volume" });
   }
   return omitted;
 }
@@ -325,7 +331,8 @@ export class DockerExecutor implements Executor {
         if (ABSENT.test(copied.stderr)) return null;
         throw failure(["cp"], copied);
       }
-      const omitted = await unpack(archive, files, name, 0);
+      // A record is one regular file. A link entry is never a record, so none gets a copy.
+      const omitted = await unpack(archive, files, name, 0, false);
       const info = await lstat(join(files, name)).catch(() => null);
       if (omitted.length || !info?.isFile() || info.size > RECORD_LIMIT) throw new Error("Invalid stored run record");
       return storedRecord(await readFile(join(files, name), "utf8"));

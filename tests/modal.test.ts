@@ -1227,6 +1227,36 @@ describe("download", () => {
     await quick.executor.download(record({ state: "finished" }), join(scratch(), "collected"));
     expect(unansweredRequests()).toBe(open);
   });
+
+  test("each collection has its own part file: a late copy of an earlier collection does not change a later collection", async () => {
+    const modal = new FakeModal(), open = unansweredRequests();
+    const store = modal.store(id, outputs);
+    // The copy of the first collection does not end in its time. Its request stays open.
+    let arriveFirst!: () => void;
+    modal.copyWait = new Promise(done => { arriveFirst = done; });
+    const directory = scratch(), destination = join(directory, "collected");
+    await expect(new ModalExecutor(() => modal.client, packageRoot(), 0, "4000M", 50, 60).download(record({ state: "finished" }), destination)).rejects.toThrow(`The outputs of run ${id} were not copied in 0 minutes.`);
+    expect(unansweredRequests()).toBe(open + 1);
+    // The outputs change, so the archive of the second collection is not the archive of the first one.
+    writeFileSync(join(store, "outputs/raw/report.md"), "# Second report\n");
+    modal.commit(id);
+    let arriveSecond!: () => void;
+    modal.copyWait = new Promise(done => { arriveSecond = done; });
+    const second = new ModalExecutor(() => modal.client, packageRoot(), 0).download(record({ state: "finished" }), destination);
+    for (let turn = 0; turn < 400 && modal.copies.length < 2; turn++) await Bun.sleep(5);
+    expect(modal.copies).toEqual(["/tmp/ultrafuzz-outputs.tar.0000", "/tmp/ultrafuzz-outputs.tar.0000"]);
+    // The copy of the second collection writes its part. Then the late copy of the first collection writes its part
+    // and removes it, before the second collection reads. With one name for both, the second collection would read
+    // the archive of the first one, or no file.
+    arriveSecond(); arriveFirst();
+    expect(await second).toEqual([]);
+    expect(readFileSync(join(destination, "raw/report.md"), "utf8")).toBe("# Second report\n");
+    for (let turn = 0; turn < 50 && unansweredRequests() > open; turn++) await Bun.sleep(5);
+    expect(unansweredRequests()).toBe(open);
+    await Bun.sleep(20);
+    // No part of the two collections is left beside the destination.
+    expect(listing(directory).filter(path => !path.startsWith("collected/"))).toEqual([]);
+  });
 });
 
 describe("cancel", () => {

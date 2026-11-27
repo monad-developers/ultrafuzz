@@ -423,7 +423,11 @@ For comparable experiments, the automatic continuation is the only extra message
 
 ## Result package
 
-Collection downloads the worker's outputs to `runs/<run-id>/collected/` and writes the result package to `runs/<run-id>/artifacts/`. On Modal the outputs travel as one tar archive in parts of 4,000 MiB, because Modal copies at most 5 GiB in one file (measured); the archive is a temporary file beside `collected/`, so collection needs about twice the size of the outputs on disk. A collection on Modal has time limits: 2 hours to pack the outputs, and about 6 hours from its start to the end of the copy. A collection that passes a limit fails with a text that names the run and the Volume, and the outputs stay in the Volume. No collection of this size has been run. The package has these files:
+Collection downloads the worker's outputs to `runs/<run-id>/collected/` and writes the result package to `runs/<run-id>/artifacts/`. On Modal the outputs travel as one tar archive in parts of 4,000 MiB, because Modal copies at most 5 GiB in one file (measured); the archive is a temporary file beside `collected/`, so collection needs about twice the size of the outputs on disk. A collection on Modal has time limits: 2 hours to pack the outputs, and about 6 hours from its start to the end of the copy. A collection that passes a limit fails with a text that names the run and the Volume, and the outputs stay in the Volume. No collection of this size has been run.
+
+A collection that cannot end in its limits also holds other work. One attempt can take about 6 hours. `watch` works on one run at a time, so during an attempt it does not refresh or collect another run. In that time it writes one line to standard error each ten minutes. `watch` makes 5 attempts for a run, and it works on the other runs between two attempts. Thus one such run can hold the other runs of a `watch` for about 30 hours in total before `watch` gives it up. To collect the other runs in that time, start a second `watch` with their IDs, or use `status <id>` for each of them. The run list of the dashboard does not refresh the other runs again while one collection runs.
+
+The package has these files:
 
 ```text
 run.yml
@@ -445,7 +449,7 @@ The rule for build and cache directories and package environments holds for the 
 
 On Modal, an output file whose name has a backslash or a control character is left out, and the run record lists it. On Docker such a file is collected with its name.
 
-No link is made on your machine. A symbolic link and a special file in the outputs are left out, and the run record lists them. A file with two names (a hard link) is collected as two files; on Docker the second name is left out when its file is not in the outputs. If `raw/report.md` itself is left out, the run is collected as a run without a report. If `raw/transcript.jsonl` is left out, collection fails.
+No link is made on your machine. A symbolic link and a special file in the outputs are left out, and the run record lists them. A file with two names (a hard link) is collected as two files; on Docker the second name is left out when its file is not in the outputs. On Docker the copies for such second names have a size limit: together they get at most as many bytes as the archive of the outputs has. A name whose copy does not fit is left out, and the run record lists it. On Modal each name is a full file in the archive, so there is no such limit. If `raw/report.md` itself is left out, the run is collected as a run without a report. If `raw/transcript.jsonl` is left out, collection fails.
 
 If one file of the workspace cannot be copied, the worker copies the others and the run record says that the export is incomplete.
 

@@ -231,6 +231,53 @@ test("the run list does not wait for a long collection: it answers with the stor
   expect(calls).toEqual(["download"]);
 });
 
+test("a failed status check is shown and written while the collection of another run still runs", async () => {
+  let release!: () => void;
+  const held = new Promise<void>(done => { release = done; });
+  // The executor cannot be asked about a running run, and the download of an ended run does not end.
+  const { home, calls, get } = await dashboard({ download: async () => { calls.push("download"); await held; throw new Error("Simulated store failure"); } }, 100);
+  await writeRun(home, running(home, unstartedId));
+  await writeRun(home, record(home, brokenId, { collection: { state: "pending", path: null, report: null } }));
+  const text = `Run ${unstartedId}: the status check failed (Simulated store failure).`;
+  const started = Date.now();
+  const lines = await stderrLines(async () => {
+    for (let poll = 0; poll < 3; poll++) {
+      const { runs } = await (await get("/api/runs")).json() as { runs: Array<RunRecord & { refresh_error?: string }> };
+      // The two runs are in one batch of the refresh, and the batch does not end. The answer is the stored records,
+      // and the run that could not be checked has its mark: it does not look like a run that is in order.
+      expect(runs.map(run => [run.id, run.state, run.refresh_error])).toEqual([[unstartedId, "running", text], [brokenId, "finished", undefined]]);
+    }
+  });
+  expect(Date.now() - started).toBeLessThan(3000);
+  // The line is written when the check fails, not when the collection of the other run ends.
+  expect(lines).toEqual([`${text} The dashboard shows the stored record and tries again at each refresh.\n`]);
+  expect(calls).toEqual(["observe", "download"]);
+  // The mark is in the answer only, never in the record.
+  expect(await readFile(join(home, "runs", unstartedId, "run.json"), "utf8")).not.toContain("refresh_error");
+  release();
+  for (let turn = 0; turn < 100 && (await readRun(home, brokenId)).collection.state === "pending"; turn++) await Bun.sleep(10);
+  expect((await readRun(home, brokenId)).collection.state).toBe("failed");
+});
+
+test("a busy lock after a failed status check changes nothing: the mark stays, and no line is written", async () => {
+  let failure = new Error("Modal credentials were not found.");
+  const { home, get } = await dashboard({ observe: async () => { throw failure; } });
+  await writeRun(home, running(home, brokenId));
+  const list = async () => (await (await get("/api/runs")).json() as { runs: Array<RunRecord & { refresh_error?: string }> }).runs;
+  const text = `Run ${brokenId}: the status check failed (Modal credentials were not found.).`;
+  expect(await stderrLines(async () => { expect((await list())[0]!.refresh_error).toBe(text); })).toHaveLength(1);
+  // Another command now works on the run. The last check that gave an answer failed, so the page still shows its mark.
+  const cause = failure;
+  failure = Object.assign(new Error("Lock file is already being held"), { code: "ELOCKED" });
+  expect(await stderrLines(async () => { expect((await list())[0]!.refresh_error).toBe(text); })).toEqual([]);
+  // The same failure after the busy lock is the same row of failures: no second line.
+  failure = cause;
+  expect(await stderrLines(async () => { expect((await list())[0]!.refresh_error).toBe(text); })).toEqual([]);
+  // Another cause in the same row of failures: the mark gets the text of the last check, and there is no new line.
+  failure = new Error("14 UNAVAILABLE");
+  expect(await stderrLines(async () => { expect((await list())[0]!.refresh_error).toBe(`Run ${brokenId}: the status check failed (14 UNAVAILABLE).`); })).toEqual([]);
+});
+
 /** A small stand-in for a DOM element: what web/app.js reads and writes. */
 class FakeElement {
   children: FakeElement[] = []; textContent = ""; className = ""; title = ""; value = ""; href = ""; target = ""; rel = ""; type = "";

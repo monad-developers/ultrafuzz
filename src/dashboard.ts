@@ -32,8 +32,10 @@ export async function serveDashboard(home: string, port = 3000, executors?: Exec
   const engine = await createEngine(home, executors, publisher);
   // Avoid overlapping collectors when multiple browser tabs poll at once.
   let refresh: Promise<Listed[]> | undefined;
-  // The runs whose last status check failed. One line on standard error for each row of failures, as in `watch`.
-  const unchecked = new Set<string>();
+  // The runs whose last status check failed, each with the text of the failure. One line on standard error for each row of failures, as in `watch`.
+  const unchecked = new Map<string, string>();
+  /** The record as the page gets it: with the mark of a failed status check, if the run has one. */
+  const marked = (record: RunRecord): Listed => unchecked.has(record.id) ? { ...record, refresh_error: unchecked.get(record.id)! } : record;
   // The list is refreshed every few seconds. A collection or a publication that failed is not tried again at each
   // refresh: the attempts move apart (2, 4, 8 and 16 minutes) and end after five failures in a row, as in `watch`.
   // The counts live in this process. `collect`, `status` and the page of one run still try at once.
@@ -59,16 +61,21 @@ export async function serveDashboard(home: string, port = 3000, executors?: Exec
     const updates: Listed[] = [];
     for (let index = 0; index < records.length; index += 4) {
       const batch = records.slice(index, index + 4);
-      const observed = await Promise.allSettled(batch.map(refreshed));
-      updates.push(...observed.map((result, offset): Listed => {
-        const stale = batch[offset]!;
-        if (result.status === "fulfilled") { unchecked.delete(stale.id); return result.value; }
-        // The stored record is shown. A busy lock is normal while another command collects the run, so it is no failure.
-        if ((result.reason as NodeJS.ErrnoException)?.code === "ELOCKED") return stale;
-        const text = failure(stale.id, result.reason);
-        if (!unchecked.has(stale.id)) { unchecked.add(stale.id); process.stderr.write(`${text} The dashboard shows the stored record and tries again at each refresh.\n`); }
-        return { ...stale, refresh_error: text };
-      }));
+      // Each run handles its own failure, at once. The other runs of the batch can take long: one collection can take
+      // hours, and the mark and the line of a failed check must not wait for it.
+      updates.push(...await Promise.all(batch.map(async (stale): Promise<Listed> => {
+        try { const next = await refreshed(stale); unchecked.delete(stale.id); return next; }
+        catch (error) {
+          // The stored record is shown. A busy lock is normal while another command collects the run, so it is no
+          // failure and it changes nothing: a mark from an earlier check stays.
+          if ((error as NodeJS.ErrnoException)?.code !== "ELOCKED") {
+            const text = failure(stale.id, error);
+            if (!unchecked.has(stale.id)) process.stderr.write(`${text} The dashboard shows the stored record and tries again at each refresh.\n`);
+            unchecked.set(stale.id, text);
+          }
+          return marked(stale);
+        }
+      })));
     }
     return updates;
   })().finally(() => { refresh = undefined; });
@@ -95,11 +102,12 @@ export async function serveDashboard(home: string, port = 3000, executors?: Exec
         }
         if (url.pathname === "/api/runs" && request.method === "GET") {
           // A refresh collects and publishes, and that can take minutes. The page must not wait for it: after a short
-          // time the answer is the stored records, and the one shared refresh continues.
+          // time the answer is the stored records, and the one shared refresh continues. The stored records get the
+          // marks of the status checks that failed, so a run that cannot be checked does not look like a run that is in order.
           const fresh = runs();
           fresh.catch(() => undefined); // The collector timer reports a failed refresh.
           let timer: ReturnType<typeof setTimeout> | undefined;
-          const stored = new Promise<Listed[]>((resolve, reject) => { timer = setTimeout(() => engine.list().then(resolve, reject), patience); });
+          const stored = new Promise<Listed[]>((resolve, reject) => { timer = setTimeout(() => engine.list().then(records => resolve(records.map(marked)), reject), patience); });
           return json({ runs: await Promise.race([fresh, stored]).finally(() => clearTimeout(timer)) });
         }
         if (url.pathname === "/api/runs" && request.method === "POST") {

@@ -136,6 +136,35 @@ describe("worker execution contract", () => {
     expect(exported.length + skipped.length).toBe(20);
     expect(skipped.map((item) => item.path)).toContain("raw/sessions/ses_19.json");
   }, 20_000);
+  test("the marker of a stop request is seen during the session export, for a worker that the signal did not reach", async () => {
+    // Each `opencode export` takes 0.3 seconds, and the run has 20 sessions. The first export marks the start.
+    const { root, job } = await stubRun(`if [ "$1" = "export" ]; then touch 'EXPORTING'; sleep 0.3; echo "{\\"id\\":\\"$2\\"}"; exit 0; fi\necho '# Report' > 'REPORT'`);
+    const script = join(root, "bin/opencode"), exporting = join(root, "exporting");
+    writeFileSync(script, readFileSync(script, "utf8").replace("EXPORTING", exporting).replace("REPORT", join(job.output_dir, "raw/report.md")));
+    fakeSync(root);
+    const data = join(root, "state/home/.local/share/opencode"); mkdirSync(data, { recursive: true });
+    const database = new Database(join(data, "opencode.db"));
+    database.exec("CREATE TABLE session (id TEXT); CREATE TABLE part (data TEXT)");
+    for (let index = 0; index < 20; index++) database.query("INSERT INTO session (id) VALUES (?)").run(`ses_${String(index).padStart(2, "0")}`);
+    database.close();
+    const exits: number[] = [];
+    // No signal is sent: the stop request is the marker file only, as `cancel` writes it into the store.
+    let markedAt = 0;
+    const poll = setInterval(() => { if (existsSync(exporting)) { clearInterval(poll); markedAt = Date.now(); writeFileSync(join(root, "cancelled"), ""); } }, 10);
+    // The grace period is 4 seconds, so the export must stop 2 seconds after the worker saw the marker. All 20 exports need 6 seconds.
+    const record = await runWorker(root, { grace: 4000, exit: (code) => { exits.push(code); } });
+    clearInterval(poll);
+    expect(markedAt).toBeGreaterThan(0);
+    expect(exits).toEqual([]);
+    expect(JSON.parse(readFileSync(join(root, "complete.json"), "utf8"))).toEqual(record);
+    // The harness call had ended before the marker, so only the export can have seen it.
+    expect(record).toMatchObject({ state: "finished", status: "succeeded", end: "cancelled", exit_code: 0, session_id: "ses_test" });
+    const exported = readdirSync(join(job.output_dir, "raw/sessions")), skipped = record.omitted.filter((item) => item.reason === "Session export unavailable; native database retained in the run store" || item.reason === "Session export failed; native database retained in the run store");
+    expect(exported.length).toBeGreaterThan(0);
+    expect(exported.length).toBeLessThan(14);
+    expect(exported.length + skipped.length).toBe(20);
+    expect(skipped.map((item) => item.path)).toContain("raw/sessions/ses_19.json");
+  }, 20_000);
   test("a stop request reaches the worker during the workspace export, which is synchronous", async () => {
     // The harness leaves 400 new files. The first copied file marks the start of the export.
     const { root, job } = await stubRun(`for i in $(seq 1 400); do echo new > "file-$i.sol"; done; echo '# Report' > 'REPORT'`);
