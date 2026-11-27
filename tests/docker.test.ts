@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { Header, c as createTar, t as listTar, x as extractTar, type HeaderData } from "tar";
 import { initWorkspace } from "../src/config";
 import { IMAGE_LABEL, READER_LABEL, RUN_LABEL, SCHEMA_LABEL, DockerExecutor, commandRunner, createArguments, unpack, type DockerOptions, type DockerResult, type DockerRunner } from "../src/docker";
@@ -231,6 +231,13 @@ describe("launch", () => {
     // The archives are temporary, and their entries belong to root, not to the host user.
     expect(existsSync(`${stage}.tar`)).toBe(false);
     expect(existsSync(docker.find("cp")[1]!.options!.input!)).toBe(false);
+    // The archive with the job is in a private directory of this launch, which is gone now. A file directly in the
+    // shared temporary directory would have a name that another user of the machine can make first.
+    const startArchive = docker.find("cp")[1]!.options!.input!;
+    expect(dirname(startArchive)).not.toBe(tmpdir());
+    expect(dirname(dirname(startArchive))).toBe(tmpdir());
+    expect(basename(dirname(startArchive))).toMatch(/^ultrafuzz-start-.{6}$/);
+    expect(existsSync(dirname(startArchive))).toBe(false);
     expect(docker.uploads.map(upload => upload.owners)).toEqual([["0:0"], ["0:0"]]);
     expect(inputs!.files).toEqual(["job.json", "profile/", "profile/skills/", "profile/skills/SKILL.md", "prompt.txt", "reference/", "reference/notes/", "reference/notes/a.md", "reference/notes/link.md", "runtime/", "runtime/plugins/", "runtime/plugins/guard.js", "runtime/worker.js", "source.tar.gz"]);
     expect(start!.files).toEqual(["job.json", "run.json"]);
@@ -488,6 +495,9 @@ describe("observe", () => {
       [fileArchive("complete.json", "{not json"), ""],
       [fileArchive("complete.json", { schema: "ultrafuzz.run.v1" }), "Invalid v0.2 run record"],
       [archive(entry({ path: "complete.json", type: "SymbolicLink", linkpath: "/etc/hostname" })), "Invalid stored run record"],
+      // A record is never taken from a hard link, also not from one to a file of the same archive.
+      [archive(entry({ path: "complete.json", type: "Link", linkpath: "complete.json" })), "Invalid stored run record"],
+      [archive(entry({ path: "complete.json/", type: "Directory" }), entry({ path: "complete.json/a" }, JSON.stringify(record({ state: "finished" }))), entry({ path: "complete.json/b", type: "Link", linkpath: "complete.json/a" })), "Invalid stored run record"],
       // One byte more than the largest record that is read.
       [archive(entry({ path: "complete.json" }, " ".repeat(16 * 1024 * 1024 + 1))), "Invalid stored run record"],
     ];
@@ -513,6 +523,18 @@ describe("observe", () => {
     docker.finished(run, null, undefined, 0);
     docker.failing.set("cp", { code: 1, overflow: true });
     expect(await notices(async () => { expect((await executor.observe(run)).complete).toBeNull(); })).toContain("cannot be used (Invalid stored run record)");
+    // A copy that this machine could not write, as with a full temporary directory, says nothing about the record.
+    // It stays an error, so the status check is tried again and a good run is not ended as a run without a record.
+    const full = setup(), good = record();
+    full.docker.finished(good, record({ state: "finished", status: "succeeded", end: "completed", exit_code: 0 }));
+    const unwritten: DockerRunner = async (args, options) => {
+      if (args[0] === "cp") throw new Error(`Could not write the output of the command to ${options!.output}: ENOSPC: no space left on device, write`);
+      return full.docker.runner(args, options);
+    };
+    let failure: unknown;
+    expect(await notices(async () => { failure = await new DockerExecutor(unwritten, full.root).observe(good).catch(error => error); })).toBe("");
+    expect((failure as Error).message).toContain("ENOSPC: no space left on device");
+    await expect(new DockerExecutor(unwritten, full.root).recover(config)).rejects.toThrow("ENOSPC");
   });
 });
 
@@ -541,11 +563,15 @@ describe("download", () => {
       ["cp", `ultrafuzz-${id}:/run-data/outputs`, "-"],
     ]);
     expect(docker.find("cp")[0]!.options).toEqual({ output: `${destination}.tar` });
-    expect(listing(home)).toEqual(["collected/", "collected/raw/", "collected/raw/report.md", "collected/raw/sessions/", "collected/raw/sessions/planted.json", "collected/run.yml"]);
+    // The second name of a hard-linked file gets a copy of the file, as on Modal.
+    expect(listing(home)).toEqual(["collected/", "collected/raw/", "collected/raw/again.md", "collected/raw/report.md", "collected/raw/sessions/", "collected/raw/sessions/planted.json", "collected/run.yml"]);
     expect(readFileSync(join(destination, "raw/report.md"), "utf8")).toBe("# Report\n");
-    expect(omitted.map(item => item.path).sort()).toEqual(["raw/again.md", "raw/device", "raw/outside-link", "raw/pipe", "raw/sessions"]);
+    expect(readFileSync(join(destination, "raw/again.md"), "utf8")).toBe("# Report\n");
+    // A copy, not a link: the two names are two files.
+    expect(lstatSync(join(destination, "raw/again.md")).nlink).toBe(1);
+    expect(lstatSync(join(destination, "raw/again.md")).ino).not.toBe(lstatSync(join(destination, "raw/report.md")).ino);
+    expect(omitted.map(item => item.path).sort()).toEqual(["raw/device", "raw/outside-link", "raw/pipe", "raw/sessions"]);
     expect(omitted.find(item => item.path === "raw/outside-link")!.reason).toBe("symbolic link excluded; the original stays in the Docker volume");
-    expect(omitted.find(item => item.path === "raw/again.md")!.reason).toContain("hard link");
     expect(omitted.find(item => item.path === "raw/pipe")!.reason).toContain("special file");
     // Modes from the container are not kept: no set-uid bit and no unreadable file or directory.
     for (const path of listing(destination)) expect(lstatSync(join(destination, path)).mode & 0o7777).toBe(path.endsWith("/") ? 0o755 : 0o644);
@@ -555,11 +581,49 @@ describe("download", () => {
   test("works after the container was removed, through a reader container", async () => {
     const { docker, executor } = setup(), run = record({ state: "finished" }), destination = join(scratch(), "collected");
     docker.finished(run, null, outputs()); docker.containers.clear();
-    expect(await executor.download(run, destination)).toHaveLength(5);
+    expect(await executor.download(run, destination)).toHaveLength(4);
     expect(docker.verbs()).toEqual(["container inspect", "volume inspect", "image inspect", "create", "cp", "rm"]);
     expect(readFileSync(join(destination, "run.yml"), "utf8")).toBe("id: run\n");
     docker.volumes.clear();
     await expect(executor.download(run, destination)).rejects.toThrow(`Docker volume ultrafuzz-${id} was not found. The outputs of run ${id} cannot be collected.`);
+  });
+
+  test("a report that is the second name of a hard-linked file is collected; a link without a file of this archive is omitted", async () => {
+    const { docker, executor } = setup(), run = record({ state: "finished" });
+    const home = scratch(), destination = join(home, "collected"), reason = "hard link excluded; the original stays in the Docker volume";
+    // Docker walks a directory in sorted order and stores the first name as the file: "report-draft.md" comes before "report.md".
+    docker.finished(run, null, archive(
+      entry({ path: "outputs/", type: "Directory" }),
+      entry({ path: "outputs/raw/", type: "Directory" }),
+      entry({ path: "outputs/raw/report-draft.md", mode: 0o4755 }, "# Report\n"),
+      entry({ path: "outputs/raw/report.md", type: "Link", linkpath: "outputs/raw/report-draft.md" }),
+      entry({ path: "outputs/raw/deep/a/copy.md", type: "Link", linkpath: "outputs/raw/report-draft.md" }),
+      // Targets that this archive did not give as a regular file below the outputs directory.
+      entry({ path: "outputs/raw/absent.md", type: "Link", linkpath: "outputs/raw/no-such-file.md" }),
+      entry({ path: "outputs/raw/host.md", type: "Link", linkpath: "/etc/hostname" }),
+      entry({ path: "outputs/raw/above.md", type: "Link", linkpath: "outputs/../../etc/hostname" }),
+      entry({ path: "outputs/raw/other.md", type: "Link", linkpath: "elsewhere/report.md" }),
+      entry({ path: "outputs/raw/pointer", type: "SymbolicLink", linkpath: "/etc/hostname" }),
+      entry({ path: "outputs/raw/through.md", type: "Link", linkpath: "outputs/raw/pointer" }),
+      entry({ path: "outputs/raw/folder.md", type: "Link", linkpath: "outputs/raw" }),
+      // A name that a file of the archive already has is never replaced.
+      entry({ path: "outputs/raw/report-draft.md", type: "Link", linkpath: "outputs/raw/report-draft.md" }),
+      // A file that was at the destination before, and is not from this archive, is never the source of a copy.
+      entry({ path: "outputs/raw/from-earlier.md", type: "Link", linkpath: "outputs/raw/earlier.md" }),
+    ));
+    mkdirSync(join(destination, "raw"), { recursive: true }); writeFileSync(join(destination, "raw/earlier.md"), "from an earlier download\n");
+    const omitted = await executor.download(run, destination);
+    expect(listing(destination)).toEqual(["raw/", "raw/deep/", "raw/deep/a/", "raw/deep/a/copy.md", "raw/earlier.md", "raw/report-draft.md", "raw/report.md"]);
+    for (const path of ["raw/report.md", "raw/deep/a/copy.md"]) {
+      expect(readFileSync(join(destination, path), "utf8")).toBe("# Report\n");
+      expect(lstatSync(join(destination, path)).mode & 0o7777).toBe(0o644);
+      expect(lstatSync(join(destination, path)).nlink).toBe(1);
+    }
+    expect(omitted).toEqual([
+      { path: "raw/pointer", reason: "symbolic link excluded; the original stays in the Docker volume" },
+      ...["raw/absent.md", "raw/host.md", "raw/above.md", "raw/other.md", "raw/through.md", "raw/folder.md", "raw/report-draft.md", "raw/from-earlier.md"].map(path => ({ path, reason })),
+    ]);
+    for (const path of listing(home)) expect(lstatSync(join(home, path)).isSymbolicLink()).toBe(false);
   });
 
   test("a store without outputs gives an empty directory", async () => {
@@ -705,6 +769,17 @@ describe("the real command runner", () => {
     const endless = await client("exec yes")([], { output, limit: 100_000 });
     expect(endless).toMatchObject({ code: 1, overflow: true });
     expect(lstatSync(output).size).toBeLessThanOrEqual(100_000);
+  });
+  test("a write error of the output file is an error of this machine, not a command that printed too much", async () => {
+    // 64 KiB is far below the limit. The device has no space, as a full temporary directory.
+    const failure = await client("head -c 65536 /dev/zero")([], { output: "/dev/full", limit: 17 * 1024 * 1024 }).catch(error => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure.message).toStartWith("Could not write the output of the command to /dev/full: ");
+    expect(failure.message).toContain("ENOSPC");
+    // The adapter reads the code ENOENT as "the docker command was not found".
+    expect(failure.code).toBeUndefined();
+    // The command is stopped: one that prints without end does not hold the call.
+    await expect(client("exec yes")([], { output: "/dev/full", limit: 1024 * 1024 })).rejects.toThrow("Could not write the output");
   });
   test("a detached command is not awaited", async () => {
     const marker = join(scratch(), "marker"), started = Date.now();

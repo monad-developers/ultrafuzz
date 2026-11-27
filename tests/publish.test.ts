@@ -34,7 +34,7 @@ async function fixture() {
   await writeFile(state, "[]");
   const record = { id, label: "baseline", publication: { repository: "example/results", branch, path: runPath } };
   await writeFile(join(root, "record.json"), JSON.stringify(record));
-  await writeFile(join(root, "publish.ts"), `import { publishRun } from ${JSON.stringify(publisher)};\ntry { console.log(JSON.stringify(await publishRun(await Bun.file(process.argv[2]).json(), process.argv[3]))); } catch (error) { console.error(error.name + ": " + error.message); process.exit(1); }\n`);
+  await writeFile(join(root, "publish.ts"), `import { publishRun } from ${JSON.stringify(publisher)};\ntry { console.log(JSON.stringify(await publishRun(await Bun.file(process.argv[2]).json(), process.argv[3]))); } catch (error) { console.error(error.name + ": " + error.message + (error.pr_url ? "\\npr_url: " + error.pr_url : "")); process.exit(1); }\n`);
   await writeFile(join(bin, "gh"), `#!${process.execPath}
 import { readFile, writeFile } from "node:fs/promises";
 const args = process.argv.slice(2), state = process.env.TEST_PR_STATE;
@@ -102,6 +102,8 @@ test("merged unchanged results return the old PR; changed artifacts fail without
   expect(changed.stderr).toContain("already merged");
   // The caller gets this answer as an error of its own class, so it can tell it from a failure that a new attempt can repair.
   expect(changed.stderr).toStartWith(`ResultsMerged: Results for ${id} were already merged; these artifacts differ.`);
+  // The error names the merged pull request: the local record of the run can be without its address.
+  expect(changed.stderr).toContain("\npr_url: https://github.com/example/results/pull/1\n");
   expect(await git(["rev-parse", "main"], f.remote)).toBe(head);
 });
 

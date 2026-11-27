@@ -21,8 +21,10 @@ export interface WorkerLimits {
   sync: number;
   /** Ends the process when a cancelled worker is still alive after the grace period. */
   exit: (code: number) => void;
+  /** Milliseconds between two points at which the workspace export, which is synchronous, lets signals and timers run. */
+  breath: number;
 }
-const defaultLimits: WorkerLimits = { grace: 5 * minute, sync: 20_000, exit: (code) => process.exit(code) };
+const defaultLimits: WorkerLimits = { grace: 5 * minute, sync: 20_000, exit: (code) => process.exit(code), breath: 200 };
 export interface Deadlines { initial: number; continuation: number; export: number }
 /** Production runs reserve 20 minutes for continuation and 10 for export, within one absolute deadline. */
 export function deadlines(start: number, end: number, configuredDuration = end - start): Deadlines {
@@ -104,7 +106,9 @@ function redactingSink(file: number, key: string, onRedaction: (count: number) =
   let pending = "";
   const flush = (final: boolean) => {
     if (key) { const parts = pending.split(key); onRedaction(parts.length - 1); pending = parts.join("[REDACTED]"); }
-    const count = final ? pending.length : Math.max(0, pending.length - Math.max(0, key.length - 1));
+    let count = final ? pending.length : Math.max(0, pending.length - Math.max(0, key.length - 1));
+    // A cut between the two halves of one character would write each half as U+FFFD. The first half waits for the second.
+    if (!final && count > 0 && (pending.charCodeAt(count - 1) & 0xfc00) === 0xd800) count--;
     if (count) appendFileSync(file, pending.slice(0, count));
     pending = pending.slice(count);
   };
@@ -206,7 +210,7 @@ function* workspaceFiles(root: string, skipped?: { count: number; first?: string
 }
 
 export async function runWorker(root: string, limits: Partial<WorkerLimits> = {}): Promise<RunRecord> {
-  const { grace, sync: syncBudget, exit } = { ...defaultLimits, ...limits };
+  const { grace, sync: syncBudget, exit, breath } = { ...defaultLimits, ...limits };
   writeFileSync(join(root, "worker.pid"), String(process.pid), { mode: 0o644 });
   const job = JSON.parse(readFileSync(join(root, "job.json"), "utf8")) as WorkerJob;
   const record = job.record;
@@ -275,7 +279,7 @@ export async function runWorker(root: string, limits: Partial<WorkerLimits> = {}
     const initial = { initial_end: result.timedOut ? "timeout" as const : result.code === 0 ? "completed" as const : "error" as const, initial_exit_code: result.code };
     const usableMinutes = (plan.continuation - Date.now()) / minute;
     if (!nonemptyReport(report) && record.session_id && !cancelled && usableMinutes >= 5) {
-      const message = `Continue. Your run stopped before report.md was written. About ${Math.floor(usableMinutes)} minutes remain. Subagents that were running when you stopped may have been stopped; rerun any whose results you do not have. Finish the task as originally instructed and write report.md before time runs out.`;
+      const message = `Continue. Your run stopped before report.md was written. About ${Math.floor(usableMinutes)} minutes remain. Subagents that were running when you stopped may have been stopped; rerun any whose results you do not have. Finish the task as originally instructed and write report.md before time runs out. report.md must be a regular file with the report text, not a link to another file.`;
       record.continuation = { trigger: "missing-report", sent_at: now(), minutes_left: Math.floor(usableMinutes), exit_code: null, report_after: false, ...initial };
       writeFileSync(join(raw, "continuation.txt"), message);
       save();
@@ -297,16 +301,23 @@ export async function runWorker(root: string, limits: Partial<WorkerLimits> = {}
     // stops early enough for the completion record and the final syncs: without the record the host loses the
     // usage and session data of the run. What was skipped is listed in `omitted` and stays in the run store.
     const planned = plan?.export ?? Date.now() + minute;
+    // A stop request can arrive during the export, so each step reads the limit again.
     const exportEnd = () => Math.min(planned, cancelledAt === null ? Infinity : cancelledAt + grace / 2);
+    // The heartbeat has ended, so the export looks at the marker of a stop request itself.
+    const marked = () => { if (!cancelled && existsSync(join(root, "cancelled"))) cancel(); };
     if (context) {
-      try { record.usage = await exportSessions(context, Math.min(exportEnd(), Date.now() + (cancelled ? 4 : 8) * minute), (path, reason) => record.omitted.push({ path, reason })) ?? record.usage; }
+      const exportStart = Date.now();
+      try { record.usage = await exportSessions(context, () => { marked(); return Math.min(exportEnd(), exportStart + (cancelled ? 4 : 8) * minute); }, (path, reason) => record.omitted.push({ path, reason })) ?? record.usage; }
       catch (error) { log(`Session export incomplete; native state retained in the run store: ${String(error)}`); record.omitted.push({ path: "raw/sessions", reason: "Native export failed; state retained in the run store" }); }
       if (record.session_id && ![...files(join(raw, "sessions"))].length) record.omitted.push({ path: "raw/sessions", reason: "Native session files unavailable; transcript retained" });
-      const kept = new Map<string, number>(), stopAt = exportEnd(), failed = { count: 0, first: undefined as string | undefined };
-      let stopped = false, agentsFailed = false;
+      const kept = new Map<string, number>(), failed = { count: 0, first: undefined as string | undefined };
+      let stopped = false, agentsFailed = false, yieldedAt = Date.now();
       try {
         for (const path of workspaceFiles(job.workspace, failed)) {
-          if (Date.now() >= stopAt) { stopped = true; break; }
+          // The copy is synchronous: no stop request and no timer can run in it. So the loop gives way at a fixed
+          // interval, not for each file: a corpus can hold very many files.
+          if (Date.now() - yieldedAt >= breath) { await new Promise<void>((next) => setImmediate(next)); marked(); yieldedAt = Date.now(); }
+          if (Date.now() >= exportEnd()) { stopped = true; break; }
           // One file that cannot be read or copied does not end the export of the others.
           try {
             const name = relative(job.workspace, path), parts = name.split("/"), index = parts.findIndex((part) => generated.has(part));

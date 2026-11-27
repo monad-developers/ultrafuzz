@@ -84,7 +84,8 @@ function number(value: string | undefined, name: string): number | undefined {
   if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer.`);
   return parsed;
 }
-const phase = (run: RunRecord) => run.state === "finished" ? `${run.status} (${run.end})` : run.state;
+/** A run that has not ended and has a stop request shows it: without that, the line of `cancel` is the same as the line before it. */
+const phase = (run: RunRecord) => run.state === "finished" ? `${run.status} (${run.end})` : run.end === "cancelled" ? `${run.state} (stop requested)` : run.state;
 function summary(run: RunRecord): string {
   return `${run.id}  ${run.label}  ${phase(run)}`;
 }
@@ -125,7 +126,8 @@ function details(run: RunRecord): string {
   else if (run.collection.state === "collected") lines.push(run.collection.path ? `No report was produced. Collected evidence: ${run.collection.path}` : "The run did not start, so there is nothing to collect.");
   if (run.collection.state === "failed") lines.push(`Collection failed: ${run.collection.error ?? "unknown error"}`);
   if (run.publication.pr_url) lines.push(`Results PR: ${run.publication.pr_url}`);
-  else if (run.publication.state === "failed") lines.push(`Publication failed: ${run.publication.error ?? "unknown error"}`);
+  // A run that has its pull request can have a later publication that failed, so the two lines do not exclude each other.
+  if (run.publication.state === "failed") lines.push(`Publication failed: ${run.publication.error ?? "unknown error"}`);
   // The pull request was merged before a later collection gave another package. The run stays published.
   if (run.publication.state === "published" && run.publication.error) lines.push(`Not published again: ${run.publication.error}`);
   return lines.join("\n");
@@ -140,15 +142,15 @@ function executorName(value: string | undefined): ExecutorName | undefined {
   return value as ExecutorName | undefined;
 }
 
-/** The commands that do one piece of work, print one result and end. `viewer` serves until it is stopped, and `wait` and `watch` poll. */
-const ONE_SHOT = ["launch", "list", "status", "collect", "cancel", "recover"];
 /**
  * A request to the executor that got no answer in its time limit stays open, and it can keep the process alive
- * after the command has printed its result. A one-shot command then ends the process itself, with the exit code
- * that it has set. `exit` is not called for another command, or when no such request is open. The result says if it was called.
+ * after the command has printed its result. The command then ends the process itself, with the exit code that it
+ * has set. This holds for every command but `viewer`, which serves until it is stopped. `wait` and `watch` need it
+ * most: they look at running sandboxes for hours, and a script waits for their end. `exit` is not called for
+ * `viewer`, without a command, or when no such request is open. The result says if it was called.
  */
 export async function endHeldProcess(command: string | undefined, exit: (code: number) => unknown, open = unansweredRequests()): Promise<boolean> {
-  if (!command || !ONE_SHOT.includes(command) || open <= 0) return false;
+  if (!command || command === "viewer" || open <= 0) return false;
   await exit(Number(process.exitCode ?? 0));
   return true;
 }

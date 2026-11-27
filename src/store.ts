@@ -8,13 +8,24 @@ export function validateRunId(id: string): void {
   if (!/^\d{8}-\d{6}-[a-f0-9]{8}$/.test(id)) throw new Error(`Invalid run ID: ${id}`);
 }
 
+/**
+ * The registry has no such run: the run directory, or the registry itself, does not exist. The error keeps the code
+ * ENOENT, which `listRuns` and `watch` test. Its text is one clear sentence for the command line and the dashboard.
+ */
+function unknownRun(home: string, id: string): (error: NodeJS.ErrnoException) => never {
+  return error => {
+    if (error.code !== "ENOENT") throw error;
+    throw Object.assign(new Error(`Run ${id} was not found in ${join(resolve(home), "runs")}. Use ultrafuzz list to see the runs of this workspace.`), { code: "ENOENT" });
+  };
+}
+
 async function directory(home: string, id: string, create = false): Promise<string> {
   validateRunId(id);
   const root = join(resolve(home), "runs"), path = join(root, id);
   if (create) await mkdir(root, { recursive: true, mode: 0o700 });
-  if (!(await lstat(root)).isDirectory()) throw new Error(`Run registry path must be a directory, not a symlink: ${root}`);
+  if (!(await lstat(root).catch(unknownRun(home, id))).isDirectory()) throw new Error(`Run registry path must be a directory, not a symlink: ${root}`);
   if (create) await mkdir(path, { recursive: true, mode: 0o700 });
-  if (!(await lstat(path)).isDirectory()) throw new Error(`Run registry path must be a directory, not a symlink: ${path}`);
+  if (!(await lstat(path).catch(unknownRun(home, id))).isDirectory()) throw new Error(`Run registry path must be a directory, not a symlink: ${path}`);
   return path;
 }
 
@@ -33,7 +44,7 @@ function validateRecord(value: unknown, id: string): asserts value is RunRecord 
 
 export async function readRun(home: string, id: string): Promise<RunRecord> {
   const path = join(await directory(home, id), "run.json");
-  if ((await lstat(path)).isSymbolicLink()) throw new Error(`Run record must not be a symlink: ${id}`);
+  if ((await lstat(path).catch(unknownRun(home, id))).isSymbolicLink()) throw new Error(`Run record must not be a symlink: ${id}`);
   const record: unknown = JSON.parse(await readFile(path, "utf8"));
   validateRecord(record, id);
   return record;
@@ -86,9 +97,13 @@ export async function updateRun(home: string, id: string, update: (record: RunRe
   });
 }
 
-/** Separate long-operation lock; registry updates remain available during I/O. */
-export async function withRunOperation<T>(home: string, id: string, operation: () => Promise<T>): Promise<T> {
-  const path = await directory(home, id, true);
+/**
+ * Separate long-operation lock; registry updates remain available during I/O. Only `create` makes the run directory:
+ * `recover` works on a run that has no local record yet. Every other caller fails for a run that the registry does
+ * not have, and leaves no empty directory behind.
+ */
+export async function withRunOperation<T>(home: string, id: string, operation: () => Promise<T>, create = false): Promise<T> {
+  const path = await directory(home, id, create);
   const release = await lockfile.lock(join(path, "operation"), { realpath: false, stale: 30_000, update: 10_000, retries: { retries: 120, factor: 1, minTimeout: 250, maxTimeout: 250 } });
   try { return await operation(); } finally { await release(); }
 }

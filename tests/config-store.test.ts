@@ -135,6 +135,36 @@ test("executor selection and tables are validated with clear errors", async () =
   await expect(load(base + docker + `[repositories.sample]\nurl = "https://github.com/example/source"\nresults_repository = "not a repository"\n`)).rejects.toThrow("must be a GitHub owner/name");
 });
 
+test("a key that the configuration does not have, a bad alias and a bad key variable are refused by name", async () => {
+  // A typing error in a key must not be ignored: `modle = "..."` would start a run with another model.
+  const repository = `[repositories.sample]\nurl = "https://github.com/example/source"\n`;
+  const cases: Array<[string, string]> = [
+    [base + docker + `[extra]\nvalue = 1\n`, "Unknown config root field: extra"],
+    [base.replace("[defaults]\n", `[defaults]\nmodle = "example/other"\n`) + docker, "Unknown config defaults field: modle"],
+    [base + `timeout = 5\n` + docker, "Unknown config openrouter field: timeout"],
+    [base + docker + repository + `branch = "main"\n`, "Unknown config repositories.sample field: branch"],
+    [base + docker + `[repositories."bad alias"]\nurl = "https://github.com/example/source"\n`, "Invalid repository alias: bad alias"],
+    [base + docker + `[repositories."-option"]\nurl = "https://github.com/example/source"\n`, "Invalid repository alias: -option"],
+    [base.replace('"EXAMPLE_KEY"', '"EXAMPLE KEY"') + docker, "Config openrouter.key_env must name an environment variable."],
+    [base.replace('"EXAMPLE_KEY"', '"1KEY"') + docker, "Config openrouter.key_env must name an environment variable."],
+    [base.replace('harness = "opencode"', 'harness = "cursor"') + docker, "Config defaults.harness must be one of claude-code, opencode, codex."],
+    [base + docker + `[repositories.sample]\nscope = "src/"\n`, "Config repositories.sample.url must be a non-empty string."],
+  ];
+  for (const [text, message] of cases) expect(await loadConfig(await configured(text)).then(() => "loaded", error => (error as Error).message)).toBe(message);
+  // The same configuration without the fault loads.
+  expect((await loadConfig(await configured(base + docker + repository))).repositories.sample).toEqual({ url: "https://github.com/example/source" });
+});
+
+test("a workspace without a configuration file or without profiles says how to make them", async () => {
+  const empty = await temporary();
+  await expect(loadConfig(empty)).rejects.toThrow(`No config at ${join(empty, "ultrafuzz.toml")}. Run ultrafuzz init first.`);
+  const home = await configured(base + docker);
+  await rm(join(home, "prompts"), { recursive: true });
+  await expect(loadConfig(home)).rejects.toThrow(`No profile catalog at ${join(home, "prompts")}. Run ultrafuzz init to install bundled profiles.`);
+  await writeFile(join(home, "prompts"), "not a directory\n");
+  await expect(loadConfig(home)).rejects.toThrow(`Profile catalog is not a directory: ${join(home, "prompts")}`);
+});
+
 test("the registry accepts the executor-neutral record and rejects one without it", async () => {
   const home = await temporary(), initial = record();
   await writeRun(home, initial);

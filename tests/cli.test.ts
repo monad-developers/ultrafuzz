@@ -1,5 +1,5 @@
 import { afterEach, expect, setSystemTime, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { endHeldProcess, main } from "../src/cli";
@@ -128,14 +128,66 @@ test("collect downloads again only with --force, and a failed collection fails t
   expect(downloads).toBe(1);
   expect(JSON.parse(forced.out)).toMatchObject({ schema: "ultrafuzz.collect.v2", collection: "collected", report_path: record.collection.report });
   expect(await readFile(record.collection.report!, "utf8")).toContain("Download 1.");
-  // A forced collection that fails keeps the earlier report, and the command fails.
+  // A forced collection that fails keeps the earlier report, and the command fails. The record is not changed, so
+  // the run stays collected: a store that was deleted after the collection must not make the run fail for good.
   executors = noExecutor;
   const failed = await cli("collect", id, "--force", "--home", home);
-  expect(failed.code).toBe(1);
-  expect(failed.out).toContain("Collection failed: Simulated store failure");
-  expect(failed.out).toContain(`Report: ${record.collection.report}`);
-  // Plain collect tries a failed collection again, and fails again.
-  expect((await cli("collect", id, "--home", home)).code).toBe(1);
+  expect(failed).toEqual({ code: 1, out: "", err: `Error: Run ${id}: the forced collection failed (Simulated store failure). The earlier package is kept, and the record is not changed.\n` });
+  for (const command of ["status", "collect", "wait"]) {
+    const kept = await cli(command, id, "--home", home);
+    expect(kept.code).toBe(0);
+    expect(kept.out).toContain(`Report: ${record.collection.report}`);
+    expect(kept.out).not.toContain("Collection failed");
+  }
+  expect(await readFile(record.collection.report!, "utf8")).toContain("Download 1.");
+  // A run whose collection has failed is tried again by plain collect, which fails again.
+  await writeRun(home, finished(home, { collection: { state: "failed", path: null, report: null, error: "earlier failure" } }));
+  const again = await cli("collect", id, "--home", home);
+  expect(again.code).toBe(1);
+  expect(again.out).toContain("Collection failed: Simulated store failure");
+});
+
+test("a run ID that the workspace does not have gives one sentence, and no command leaves a directory for it", async () => {
+  const home = await workspace(), unknown = "20200101-000000-00000000";
+  const text = `Run ${unknown} was not found in ${join(home, "runs")}. Use ultrafuzz list to see the runs of this workspace.`;
+  for (const command of ["status", "collect", "cancel", "wait"]) {
+    expect(await cli(command, unknown, "--home", home)).toEqual({ code: 1, out: "", err: `Error: ${text}\n` });
+    const json = await cli(command, unknown, "--home", home, "--json");
+    expect([json.code, JSON.parse(json.out)]).toEqual([1, { schema: "ultrafuzz.error.v2", error: text }]);
+  }
+  expect((await cli("collect", unknown, "--force", "--home", home)).err).toBe(`Error: ${text}\n`);
+  expect(await readdir(join(home, "runs")).catch(() => [])).toEqual([]);
+  expect((await cli("list", "--home", home)).out).toBe("No runs yet.\n");
+  // The same with other runs in the registry.
+  await settledRun(home);
+  expect((await cli("status", unknown, "--home", home)).err).toBe(`Error: ${text}\n`);
+  expect(await readdir(join(home, "runs"))).toEqual([id]);
+});
+
+test("cancel shows that the stop request was recorded, and list and the watch summary show it until the run ends", async () => {
+  const home = await workspace();
+  const active = { status: "pending", end: null, exit_code: null, finished_at: null, collection: { state: "pending", path: null, report: null } } as const;
+  await writeRun(home, finished(home, { ...active, state: "running" }));
+  // The executor knows the runtime and asked it to stop. The worker has up to five minutes.
+  executors = async () => ({ ...await noExecutor("docker"), cancel: async () => true, observe: async () => ({ code: null, runtime_id: "container-1", complete: null }) });
+  expect((await cli("list", "--home", home)).out).toBe(`${id}  baseline  running\n`);
+  expect(await cli("cancel", id, "--home", home)).toEqual({ code: 0, err: "", out: `${id}  baseline  running (stop requested)\n` });
+  expect((await cli("list", "--home", home)).out).toBe(`${id}  baseline  running (stop requested)\n`);
+  expect((await cli("status", id, "--home", home)).out).toBe(`${id}  baseline  running (stop requested)\n`);
+  expect((await cli("watch", id, "--once", "--home", home)).out).toContain(`${id}  baseline  https://github.com/example/source  running (stop requested)  no report\n`);
+  // The JSON fields do not change: the request is the `end` of a run that has not ended.
+  expect(JSON.parse((await cli("status", id, "--json", "--home", home)).out)).toMatchObject({ state: "running", status: "pending", end: "cancelled" });
+  // A launch that was killed while it prepared the run: `cancel` and then `status` end it.
+  await writeRun(home, finished(home, { ...active, state: "prepared", started_at: null }));
+  expect((await cli("cancel", id, "--home", home)).out).toBe(`${id}  baseline  prepared (stop requested)\n`);
+  expect((await cli("status", id, "--home", home)).out).toStartWith(`${id}  baseline  failed (cancelled)\n`);
+  // A running run that the executor does not know: nothing was stopped, and nothing is printed as a success.
+  await writeRun(home, finished(home, { ...active, state: "running" }));
+  executors = async () => ({ ...await noExecutor("docker"), cancel: async () => false });
+  const refused = await cli("cancel", id, "--home", home);
+  expect([refused.code, refused.out]).toEqual([1, ""]);
+  expect(refused.err).toContain("so nothing was stopped");
+  expect((await cli("list", "--home", home)).out).toBe(`${id}  baseline  running\n`);
 });
 
 test("a failed publication fails wait and collect, and a local-only run does not", async () => {
@@ -185,9 +237,19 @@ test("a run whose pull request was merged before a later collection stays publis
   // A published run without such a reason has no such line.
   await settledRun(home, { publication: { state: "published", repository: "owner/results", branch: `ultrafuzz/${id}`, path: `attempts/baseline/runs/${id}`, pr_url: "https://github.com/owner/results/pull/7" } });
   expect((await cli("status", id, "--home", home)).out).not.toContain("Not published again");
+  // A run that has its pull request, and whose later publication failed: the cause is shown next to the request.
+  // This is a failure that a new attempt can repair, not a run that was not published again.
+  await settledRun(home, { publication: { state: "failed", repository: "owner/results", branch: `ultrafuzz/${id}`, path: `attempts/baseline/runs/${id}`, pr_url: "https://github.com/owner/results/pull/7", error: "push failed" } });
+  publisher = async () => { throw new Error("push failed"); };
+  for (const command of ["status", "wait", "collect"]) {
+    const failed = await cli(command, id, "--home", home);
+    expect(failed.code).toBe(command === "status" ? 0 : 1);
+    expect(failed.out).toContain("Results PR: https://github.com/owner/results/pull/7\nPublication failed: push failed\n");
+    expect(failed.out).not.toContain("Not published again");
+  }
 });
 
-test("a one-shot command ends the process itself when a request to the executor is still open; viewer, wait and watch never do", async () => {
+test("a command ends the process itself when a request to the executor is still open; viewer never does", async () => {
   const home = await workspace(); await settledRun(home);
   const exits: number[] = [];
   timing = { exit: code => { exits.push(code); } };
@@ -204,9 +266,18 @@ test("a one-shot command ends the process itself when a request to the executor 
     expect(results.map(result => result.code)).toEqual([0, 0, 0, 0, 1, 1]);
     expect(exits).toEqual([0, 0, 0, 0, 1, 1]);
     expect(results[0]!.out).toContain(`${id}  baseline  succeeded (completed)`);
-    // A command that polls, a command without an executor, and an argument error do not.
+    // The commands that poll need this most: they look at running sandboxes for hours, and a script waits for their
+    // end. Each one ends the process after its last line, with its own exit code.
     exits.length = 0;
-    for (const args of [["wait", id], ["watch", "--once"], ["watch", id], ["profiles"], ["--version"], ["--help"], ["no-such-command"]]) await cli(...args, "--home", home);
+    const polled = [];
+    for (const args of [["wait", id], ["watch", "--once"], ["watch", id], ["watch", "20200101-000000-00000000", "--once"]]) polled.push(await cli(...args, "--home", home));
+    expect(polled.map(result => result.code)).toEqual([0, 0, 0, 1]);
+    expect(exits).toEqual([0, 0, 0, 1]);
+    expect(polled[0]!.out).toContain(`${id}  baseline  succeeded (completed)`);
+    expect(polled[2]!.out).toStartWith("Summary. Runs: 1.");
+    // Without a command, and for an argument error before the command is known, nothing is ended.
+    exits.length = 0;
+    for (const args of [["--version"], ["--help"], ["no-such-command"]]) await cli(...args, "--home", home);
     expect(exits).toEqual([]);
     // The rule itself, for each command of the command line. `viewer` serves until it is stopped.
     const ended: string[] = [];
@@ -214,8 +285,13 @@ test("a one-shot command ends the process itself when a request to the executor 
       if (await endHeldProcess(command, () => { ended.push(command); }, 1)) expect(ended.at(-1)).toBe(command);
       expect(await endHeldProcess(command, () => { ended.push(`${command} with nothing open`); }, 0)).toBe(false);
     }
-    expect(ended).toEqual(["launch", "list", "status", "collect", "cancel", "recover"]);
+    expect(ended).toEqual(["init", "launch", "list", "status", "wait", "watch", "collect", "cancel", "recover", "profiles"]);
     expect(await endHeldProcess(undefined, () => { ended.push("no command"); }, 1)).toBe(false);
+    // An answer is counted once: a second call of the function that reports it changes nothing.
+    const second = unansweredRequest();
+    expect(unansweredRequests()).toBe(2);
+    second(); second();
+    expect(unansweredRequests()).toBe(1);
   } finally { answered(); }
   expect(unansweredRequests()).toBe(0);
   // The request was answered late: the process ends by itself again.
@@ -223,7 +299,7 @@ test("a one-shot command ends the process itself when a request to the executor 
   expect(exits).toEqual([]);
 });
 
-test("the real command line ends a one-shot command that an open request holds, with its output whole, and leaves watch alone", async () => {
+test("the real command line ends a command that an open request holds, with its output whole", async () => {
   // The record is larger than a pipe takes at once, so an exit that does not wait for the output cuts it.
   const home = await workspace(), text = "long error text ".repeat(20_000); await settledRun(home, { error: text });
   // This file is loaded before the command line. It opens one request and keeps the process alive for some time, as a
@@ -239,21 +315,15 @@ test("the real command line ends a one-shot command that an open request holds, 
   expect(JSON.parse(out)).toMatchObject({ schema: "ultrafuzz.list.v2", runs: [{ id, error: text }] });
   // A failed one-shot command keeps its exit code.
   expect(await Bun.spawn(command("status", "20200101-000000-00000000"), { stdin: "ignore", stdout: "ignore", stderr: "ignore" }).exited).toBe(1);
-  // `watch` prints its summary and is not ended: the process is still there some time later.
-  const watch = Bun.spawn(command("watch", "--once"), { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-  try {
-    let printed = "";
-    const reader = watch.stdout.getReader(), decoder = new TextDecoder();
-    while (!printed.includes("\n")) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      printed += decoder.decode(value);
-    }
-    reader.releaseLock();
-    expect(printed).toContain("No runs to watch.");
-    await Bun.sleep(700);
-    expect(watch.exitCode).toBeNull();
-  } finally { watch.kill(); await watch.exited; }
+  // `watch` and `wait` end with their own exit code and their output whole: a script waits for their end.
+  for (const [args, expected] of [[["watch", "--once"], "No runs to watch.\n"], [["watch", id, "--once"], "Summary. Runs: 1. With a report: 1. Settled: 1. Watch failures: 0. Not settled: 0.\n"], [["wait", id], `${id}  baseline  succeeded (completed)\n`]] as const) {
+    const child = Bun.spawn(["bash", "-c", '"$@" | cat; exit "${PIPESTATUS[0]}"', "bash", ...command(...args)], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const [ended, printed] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+    expect(ended).toBe(0);
+    expect(printed).toStartWith(expected);
+    // The long error text of the record is the last part of the `wait` output. It is whole.
+    if (args[0] === "wait") expect(printed.length).toBeGreaterThan(300_000);
+  }
 }, 60_000);
 
 test("a run that failed before it started shows its cause and does not fail wait or collect", async () => {
@@ -562,6 +632,103 @@ test("launch --revision audits the named commit, and the flag stays a launch fla
   // The check of the value is the one of the source step, and the flag applies to no other command.
   expect((await cli("launch", "example", "--label", "bad", "--revision=--upload-pack=x", "--home", home)).err).toContain("Invalid repository revision");
   for (const command of ["status", "collect", "watch"]) expect((await cli(command, id, "--revision", old, "--home", home)).err).toContain(`--revision does not apply to ${command}.`);
+});
+
+test("each documented launch rule refuses the launch with its own text, before a run is recorded", async () => {
+  const home = await workspace();
+  await writeFile(join(home, "ultrafuzz.toml"), `${await readFile(join(home, "ultrafuzz.toml"), "utf8")}[repositories.other]\nurl = "https://github.com/example/other"\n`);
+  await writeFile(join(home, "object.json"), "{}\n");
+  await writeFile(join(home, "properties.md"), "P-001\n");
+  let launches = 0;
+  executors = async () => ({ ...await noExecutor("docker"), launch: async () => { launches++; return "container-1"; } });
+  const label = "--label is required; use letters, digits, dots, underscores or hyphens.", range = "Timeout must be between 3600 and 86400 seconds, including continuation and export time.";
+  const refused = async (text: string, ...args: string[]) => {
+    expect([args.join(" "), await cli("launch", ...args, "--home", home)]).toEqual([args.join(" "), { code: 1, out: "", err: `Error: ${text}\n` }]);
+  };
+  // The key variable is not set.
+  expect(process.env.ULTRAFUZZ_CLI_TEST_KEY).toBeUndefined();
+  await refused("Set ULTRAFUZZ_CLI_TEST_KEY to an OpenRouter API key.", "example", "--label", "one");
+  await refused("Set OTHER_ULTRAFUZZ_TEST_KEY to an OpenRouter API key.", "example", "--label", "one", "--key-env", "OTHER_ULTRAFUZZ_TEST_KEY");
+  await refused("Invalid key environment variable name", "example", "--label", "one", "--key-env", "NOT A NAME");
+  // With a key, each of the other rules is the one that fails.
+  process.env.ULTRAFUZZ_CLI_TEST_KEY = "not-a-real-key";
+  for (const bad of ["bad label", "a/b", "..", ".", "-leading", "x".repeat(121)]) await refused(label, "example", `--label=${bad}`);
+  await refused("launch requires a repository alias and --label.", "example");
+  await refused("launch requires a repository alias and --label.", "--label", "one");
+  await refused("Unknown repository missing; add it to ultrafuzz.toml.", "missing", "--label", "one");
+  for (const seconds of ["100", "3599", "86401", "90000"]) await refused(range, "example", "--label", "one", "--timeout", seconds);
+  await refused("--timeout must be a positive integer.", "example", "--label", "one", "--timeout", "1.5");
+  await refused("A model is required", "example", "--label", "one", "--model", "  ");
+  await refused("--harness must be one of claude-code, opencode, codex.", "example", "--label", "one", "--harness", "cursor");
+  await refused("--executor must be one of docker, modal.", "example", "--label", "one", "--executor", "kubernetes");
+  await refused("Executor modal is not configured. Add a [modal] table to ultrafuzz.toml.", "example", "--label", "one", "--executor", "modal");
+  await refused("Specify the repository once.", "example", "--repository", "other", "--label", "one");
+  await refused("Input names must be unique.", "example", "--label", "one", "--input", "notes=./a.md", "--input", "notes=./b.md");
+  await refused("Supply properties using either --properties or a named input, not both.", "example", "--label", "one", "--profile", "v2/stateful-fuzzing", "--properties", join(home, "properties.md"), "--input", `properties=${join(home, "properties.md")}`);
+  await refused("--inputs must name a JSON file containing an array.", "example", "--label", "one", "--inputs", join(home, "object.json"));
+  await refused("v2/stateful-fuzzing requires --properties <file | run-id>.", "example", "--label", "one", "--profile", "v2/stateful-fuzzing");
+  // The template of `init` has an empty model, so a launch without --model says what is absent.
+  await writeFile(join(home, "ultrafuzz.toml"), (await readFile(join(home, "ultrafuzz.toml"), "utf8")).replace('"example/model"', '""'));
+  await refused("A model is required", "example", "--label", "one");
+  // The same repository named twice is not a conflict: this launch ends at a later rule.
+  await refused("A model is required", "example", "--repository", "example", "--label", "one");
+  // No rule above left a run in the registry or reached the executor.
+  expect(await readdir(join(home, "runs")).catch(() => [])).toEqual([]);
+  expect(launches).toBe(0);
+});
+
+test("argument errors have their own text, and with --json each one is a JSON line on standard output", async () => {
+  const home = await workspace(); await settledRun(home);
+  // An option that does not exist fails in the parser, before the value of --json is known.
+  const bogus = await cli("list", "--bogus", "--json", "--home", home);
+  expect([bogus.code, bogus.err]).toEqual([1, ""]);
+  expect(JSON.parse(bogus.out)).toEqual({ schema: "ultrafuzz.error.v2", error: expect.stringContaining("--bogus") });
+  expect((await cli("list", "--bogus", "--home", home)).out).toBe("");
+  for (const [text, ...args] of [
+    ["init takes no positional argument.", "init", "extra"], ["list takes no positional argument.", "list", "extra"],
+    ["profiles takes no positional argument.", "profiles", "extra"], ["viewer takes no positional argument.", "viewer", "extra"],
+    ["Unexpected positional arguments.", "status", id, "extra"], ["Invalid run ID: not-a-run-id", "recover", "not-a-run-id"],
+    ["Invalid run ID: not-a-run-id", "status", "not-a-run-id"], ["status requires a run ID.", "status"],
+    ["--port does not apply to list.", "list", "--port", "3000"], ["--port must be a positive integer.", "viewer", "--port", "0"],
+    ["Unknown command frobnicate. Run ultrafuzz --help.", "frobnicate"],
+  ] as const) {
+    expect([text, await cli(...args, "--home", home)]).toEqual([text, { code: 1, out: "", err: `Error: ${text}\n` }]);
+    const json = await cli(...args, "--json", "--home", home);
+    expect([json.code, json.err, JSON.parse(json.out)]).toEqual([1, "", { schema: "ultrafuzz.error.v2", error: text }]);
+  }
+});
+
+test("collect refuses a run that still runs, list marks a failed collection, and profiles prints each description", async () => {
+  const home = await workspace();
+  await writeRun(home, finished(home, { state: "running", status: "pending", end: null, exit_code: null, finished_at: null, collection: { state: "pending", path: null, report: null } }));
+  executors = async () => ({ ...await noExecutor("docker"), observe: async () => ({ code: null, runtime_id: "container-1", complete: null }) });
+  expect(await cli("collect", id, "--home", home)).toEqual({ code: 1, out: "", err: "Error: Run is still active; use status or wait.\n" });
+  expect((await cli("list", "--home", home)).out).toBe(`${id}  baseline  running\n`);
+  // The last column of `list` is the report, or the reason why there is none.
+  await writeRun(home, finished(home, { collection: { state: "failed", path: null, report: null, error: "Simulated store failure" } }));
+  expect((await cli("list", "--home", home)).out).toBe(`${id}  baseline  succeeded (completed)  collection failed\n`);
+  await writeRun(home, finished(home, { status: "failed", collection: { state: "collected", path: join(home, "runs", id, "artifacts"), report: null } }));
+  expect((await cli("list", "--home", home)).out).toBe(`${id}  baseline  failed (completed)  no report\n`);
+  const profiles = JSON.parse((await cli("profiles", "--json", "--home", home)).out).profiles as Array<{ name: string; description: string; harnesses: string[] }>;
+  expect(profiles.map(profile => profile.name)).toEqual(["v2/pareto", "v2/property-specification-collaborative", "v2/stateful-fuzzing"]);
+  const text = (await cli("profiles", "--home", home)).out;
+  for (const profile of profiles) {
+    expect(profile.description.length).toBeGreaterThan(20);
+    expect(text).toContain(`${profile.name}  ${profile.harnesses.join(", ")}\n  ${profile.description}\n`);
+  }
+});
+
+test("viewer serves on port 3000 when no port is given, as the help text and the README say", async () => {
+  const home = await workspace(); await settledRun(home);
+  const started = await cli("viewer", "--home", home);
+  // Another program can have the port on this machine. Then there is nothing to check.
+  if (started.code !== 0 && /in use|EADDRINUSE/i.test(started.err)) return;
+  try {
+    expect(started).toMatchObject({ code: 0, out: "Dashboard: http://127.0.0.1:3000\n" });
+    const runs = await (await fetch("http://127.0.0.1:3000/api/runs")).json() as { runs: RunRecord[] };
+    expect(runs.runs.map(run => run.id)).toEqual([id]);
+    expect((await cli("--help")).out).toContain("Viewer option: --port <number> (default 3000)");
+  } finally { process.emit("SIGTERM"); } // The dashboard stops at this signal.
 });
 
 test("every flag of the launch options in --help is accepted by launch", async () => {

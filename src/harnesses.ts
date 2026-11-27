@@ -166,8 +166,11 @@ export function usageFromEvents(harness: Harness, events: ObjectValue[]): Usage 
   return opencodeStepUsage([...steps.values()], "OpenCode completed lead step_finish.cost; estimate, subagents may be absent");
 }
 
-/** All OpenCode sessions belong to this run's private home, so exporting every id includes native subagents. */
-export async function exportSessions(context: HarnessContext, deadline: number, omitted: (path: string, reason: string) => void = () => {}): Promise<Usage | null> {
+/**
+ * All OpenCode sessions belong to this run's private home, so exporting every id includes native subagents.
+ * `deadline` is read before each step: a stop request during the export makes it earlier.
+ */
+export async function exportSessions(context: HarnessContext, deadline: () => number, omitted: (path: string, reason: string) => void = () => {}): Promise<Usage | null> {
   const destination = join(context.raw, "sessions");
   mkdirSync(destination, { recursive: true });
   if (context.name !== "opencode") {
@@ -185,14 +188,15 @@ export async function exportSessions(context: HarnessContext, deadline: number, 
     parts = (database.query("SELECT data FROM part").all() as { data: string }[]).map((row) => JSON.parse(row.data)).filter((part) => part.type === "step-finish");
   } finally { database.close(); }
   for (const id of ids) {
-    if (Date.now() >= deadline || !/^[a-zA-Z0-9_-]+$/.test(id)) { omitted(`raw/sessions/${id}.json`, "Session export unavailable; native database retained in the run store"); continue; }
-    const output = await captureCommand([context.executable, "export", id], context, Math.min(30_000, deadline - Date.now()), true);
+    const limit = deadline();
+    if (Date.now() >= limit || !/^[a-zA-Z0-9_-]+$/.test(id)) { omitted(`raw/sessions/${id}.json`, "Session export unavailable; native database retained in the run store"); continue; }
+    const output = await captureCommand([context.executable, "export", id], context, Math.min(30_000, limit - Date.now()), true);
     if (output.code === 0) write(join(destination, `${id}.json`), redactText(output.stdout, [context.env.OPENROUTER_API_KEY!]).text);
     else omitted(`raw/sessions/${id}.json`, "Session export failed; native database retained in the run store");
   }
   return opencodeStepUsage(parts, "OpenCode native completed step-finish.cost across all sessions; estimate, unfinished steps may be absent");
 }
-async function codexNativeUsage(context: HarnessContext, directory: string, deadline: number): Promise<Usage | null> {
+async function codexNativeUsage(context: HarnessContext, directory: string, deadline: () => number): Promise<Usage | null> {
   const responses = new Map<string, ObjectValue>(), observedModels: string[] = [];
   for (const path of files(directory)) {
     if (!path.endsWith(".jsonl")) continue;
@@ -208,7 +212,7 @@ async function codexNativeUsage(context: HarnessContext, directory: string, dead
   if (!responses.size) return null;
   const values = [...responses.values()], input = sum(values.map((value) => number(value.input_tokens))), output = sum(values.map((value) => number(value.output_tokens)));
   const usage: Usage = { input_tokens: input, output_tokens: output, cost_usd: null, cost_provenance: "Codex native response usage across sessions; catalog cost unavailable" };
-  if (input === null || output === null || deadline - Date.now() < 3_000) return usage;
+  if (input === null || output === null || deadline() - Date.now() < 3_000) return usage;
   try {
     const configs = [...files(context.nativeHome)].filter((path) => path.endsWith(".toml")).map((path) => parseToml(readFileSync(path, "utf8")));
     if (!codexPricingModelMatches(context.model, configs, observedModels)) {

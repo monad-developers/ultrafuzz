@@ -164,6 +164,7 @@ class FakeSandbox {
       this.modal.copies.push(path);
       const from = this.present(path);
       if (this.modal.copyFailure) throw this.modal.copyFailure;
+      await this.modal.copyWait;
       mkdirSync(dirname(to), { recursive: true });
       if (this.modal.archive) writeFileSync(to, this.modal.archive); else copyFileSync(from, to);
     },
@@ -187,7 +188,7 @@ class FakeSandbox {
     else if (code === 0 && command[0] === "sh" && command.length === 6) code = run(this.local(command[4]!), this.local(command[5]!));
     // On a version 2 Volume, sync on the mount point commits.
     if (code === 0 && command[0] === "sync" && this.volume && !this.readOnly) this.modal.commit(this.volume);
-    return { wait: async () => code, stderr: { readText: async () => this.modal.stderr } };
+    return { wait: async () => { if (this.modal.waitFailure) throw this.modal.waitFailure; return code; }, stderr: { readText: async () => this.modal.stderr } };
   }
   async poll() { if (this.modal.pollFailure) throw this.modal.pollFailure; return this.exit; }
   async terminate(params?: { wait?: boolean }) {
@@ -252,6 +253,10 @@ class FakeModal {
   buildFailure?: Error;
   buildFailures: Error[] = [];
   copyFailure?: Error;
+  /** When set, copyToLocal() writes its file only after this promise. */
+  copyWait?: Promise<void>;
+  /** What the wait for the end of a command throws, as the SDK does at the time limit of the command. */
+  waitFailure?: Error;
   pollFailure?: Error;
   lookupFailure?: Error;
   terminateFailure?: Error;
@@ -863,7 +868,21 @@ describe("observe", () => {
       silent.modal.store(id, files);
       const printed = await notices(async () => { expect(await silent.executor.observe(run)).toEqual({ code: undefined, runtime_id: "sb-forgotten", complete: null }); });
       expect(printed).toBe(`Modal does not know sandbox sb-forgotten of run ${id} in app ultrafuzz, environment main. A run that was launched from another Modal workspace or environment is not visible with this profile.\n`);
+      // One line for a row of such answers: `wait` asks every 5 seconds for the 30 minutes before the run is recorded as lost.
+      expect(await notices(async () => { for (let poll = 0; poll < 3; poll++) expect((await silent.executor.observe(run)).code).toBeUndefined(); })).toBe("");
+      // Another run gets its own line.
+      const second = record({ state: "running" }, other, { runtime_id: "sb-other" });
+      expect(await notices(async () => { await silent.executor.observe(second); await silent.executor.observe(second); })).toBe(printed.replace("sb-forgotten", "sb-other").replace(id, other));
     }
+    // An answer that knows the run arms the line again: a process that lives long, such as the dashboard, writes it for the next row.
+    const again = world();
+    const beat = (age: number) => again.modal.store(id, { "run.json": record({ state: "running", last_observed_at: new Date(Date.now() - age).toISOString() }) });
+    beat(600_000);
+    expect(await notices(async () => { await again.executor.observe(run); await again.executor.observe(run); })).toContain("Modal does not know sandbox sb-forgotten");
+    beat(20_000);
+    expect(await notices(async () => { expect((await again.executor.observe(run)).code).toBeNull(); })).toBe("");
+    beat(600_000);
+    expect((await notices(async () => { await again.executor.observe(run); await again.executor.observe(run); })).match(/Modal does not know sandbox/g)).toHaveLength(1);
     // Any other answer to the second question stays an error.
     const failing = world();
     failing.modal.lookupFailure = grpc(14, "UNAVAILABLE: connection refused");
@@ -1038,7 +1057,9 @@ describe("download", () => {
     expect(helper.execs).toHaveLength(1);
     expect(helper.execs[0]!.slice(0, 2)).toEqual(["sh", "-c"]);
     expect(helper.execs[0]!.slice(3)).toEqual(["sh", "/tmp/ultrafuzz-outputs.tar", "/run-data/outputs"]);
-    expect(helper.execOptions).toEqual([{ stdout: "ignore", timeoutMs: 900_000 }]);
+    // The time of a collection grows with the outputs. So this helper lives for 6 hours at most, not 30 minutes, and the pack has 2 hours.
+    expect(helper.execOptions).toEqual([{ stdout: "ignore", timeoutMs: 7_200_000 }]);
+    expect(helper.options).toMatchObject({ command: ["sleep", "21600"], timeoutMs: 21_600_000, cpu: 0.25, memoryMiB: 256 });
     // One part, and the copy that finds no second part.
     expect(modal.copies).toEqual(["/tmp/ultrafuzz-outputs.tar.0000", "/tmp/ultrafuzz-outputs.tar.0001"]);
     expect(existsSync(`${destination}.tar.part`)).toBe(false);
@@ -1161,6 +1182,50 @@ describe("download", () => {
       expect(listing(root)).toEqual(["collected/"]);
       expectReader(modal.helpers()[0]!);
     }
+  });
+
+  test("a pack or a copy that does not end in its time is an error that names the run and the Volume", async () => {
+    // The SDK ends the wait for the pack command at its time limit, with a text that names no cause.
+    const slow = world();
+    slow.modal.store(id, outputs);
+    slow.modal.waitFailure = new Error("Deadline exceeded while waiting for exec 0123");
+    const root = scratch();
+    await expect(slow.executor.download(record({ state: "finished" }), join(root, "collected"))).rejects.toThrow(`The outputs of run ${id} were not packed in 120 minutes. They stay in Modal Volume ${id}.`);
+    expect(listing(root)).toEqual(["collected/"]);
+    expectReader(slow.modal.helpers()[0]!);
+
+    // The SDK sets no limit for a copy, and it waits for ever when the helper ends under it. The copy has a limit of its own.
+    const modal = new FakeModal(), open = unansweredRequests();
+    modal.store(id, outputs);
+    let arrive!: () => void;
+    modal.copyWait = new Promise(done => { arrive = done; });
+    const directory = scratch(), destination = join(directory, "collected"), started = Date.now();
+    const failure = await new ModalExecutor(() => modal.client, packageRoot(), 0, "4000M", 50, 60).download(record({ state: "finished" }), destination).catch(error => error) as Error;
+    expect(failure.message).toBe(`The outputs of run ${id} were not copied in 0 minutes. They stay in Modal Volume ${id}.`);
+    expect(Date.now() - started).toBeLessThan(5000);
+    // The helper is stopped, and nothing of the copy is left beside the destination.
+    expectReader(modal.helpers()[0]!);
+    expect(listing(directory)).toEqual(["collected/"]);
+    // The request is still open. It is counted, so a command that has printed its result can end the process.
+    expect(unansweredRequests()).toBe(open + 1);
+    // The copy ends after all and writes its part. The part is removed again, and the request is not counted any more.
+    arrive();
+    for (let turn = 0; turn < 50 && unansweredRequests() > open; turn++) await Bun.sleep(5);
+    expect(unansweredRequests()).toBe(open);
+    await Bun.sleep(20);
+    expect(listing(directory)).toEqual(["collected/"]);
+    // What an earlier collection left when its process ended in a copy is removed by the next collection of the run.
+    writeFileSync(`${destination}.tar.0a1b2c3d.part`, "old part");
+    writeFileSync(join(directory, ".modal-sandbox-fs-tmp-0011223344556677"), "old copy");
+    writeFileSync(join(directory, "run.json"), "{}");
+    modal.copyWait = undefined;
+    await new ModalExecutor(() => modal.client, packageRoot(), 0).download(record({ state: "finished" }), destination);
+    expect(listing(directory).filter(path => !path.startsWith("collected/"))).toEqual(["run.json"]);
+    // A copy that ends in its time is not counted.
+    const quick = world();
+    quick.modal.store(id, outputs);
+    await quick.executor.download(record({ state: "finished" }), join(scratch(), "collected"));
+    expect(unansweredRequests()).toBe(open);
   });
 });
 

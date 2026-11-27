@@ -155,6 +155,11 @@ describe("profiles", () => {
     const rendered = await renderPrompt(profile, { ...context, inputs: [{ name: "properties", path: "/run-data/reference/properties/report.md", sha256: "b".repeat(64), source_run: "20261103-120000-1234abcd" }] });
     expect(rendered).toContain('"source_run": "20261103-120000-1234abcd"');
     expect(rendered).toContain('"fuzz_budget_seconds": 2400');
+    // The suggested budget is a third of the harness time, and 4 hours at most: the longest run gives 84,300 seconds to the harness.
+    const properties = { name: "properties", path: "/run-data/reference/properties/report.md", sha256: "b".repeat(64) };
+    expect(await renderPrompt(profile, { ...context, timeout_seconds: 84_300, inputs: [properties] })).toContain('"fuzz_budget_seconds": 14400');
+    expect(await renderPrompt(profile, { ...context, timeout_seconds: 43_200, inputs: [properties] })).toContain('"fuzz_budget_seconds": 14400');
+    expect(await renderPrompt(profile, { ...context, timeout_seconds: 43_199, inputs: [properties] })).toContain('"fuzz_budget_seconds": 14399');
     expect(rendered).toContain("{globalThis.__profileExecuted = true}");
     expect((globalThis as Record<string, unknown>).__profileExecuted).toBeUndefined();
   });

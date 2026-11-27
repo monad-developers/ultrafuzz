@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, openSync, writeSync } from "node:fs";
-import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, stat, writeFile } from "node:fs/promises";
+import { closeSync, constants, openSync, writeSync } from "node:fs";
+import { chmod, copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { c as createTar, x as extractTar, type ReadEntry } from "tar";
@@ -79,16 +79,27 @@ export function commandRunner(binary = "docker"): DockerRunner {
       child.once("spawn", () => { child.unref(); resolvePromise({ code: 0, stdout: "", stderr: "" }); });
       return;
     }
-    let stdout = "", stderr = "", written = 0, overflow = false;
+    let stdout = "", stderr = "", written = 0, overflow = false, unwritten: Error | undefined;
     child.stdout?.on("data", (chunk: Buffer) => {
       if (limit === undefined) { stdout = tail(stdout + chunk, 4 * 1024 * 1024); return; }
-      if (overflow) return;
+      if (overflow || unwritten) return;
       if (written + chunk.length > limit) { overflow = true; child.kill("SIGKILL"); return; }
-      try { writeSync(bounded!, chunk); written += chunk.length; }
-      catch (error) { overflow = true; stderr = String(error); child.kill("SIGKILL"); }
+      // One call can write a part of the chunk only.
+      try { for (let offset = 0; offset < chunk.length;) offset += writeSync(bounded!, chunk, offset); written += chunk.length; }
+      catch (error) {
+        // A write error of this machine, such as a full disk, is not the limit: the output is not too large. The error
+        // has no code, so a caller cannot take it for a command that was not found.
+        unwritten = new Error(`Could not write the output of the command to ${options.output}: ${error instanceof Error ? error.message : String(error)}`);
+        child.kill("SIGKILL");
+      }
     });
     child.stderr?.on("data", chunk => { stderr = tail(stderr + chunk, 64 * 1024); });
-    child.once("close", code => { release(); resolvePromise({ code: overflow ? 1 : code ?? 1, stdout, stderr, ...(overflow ? { overflow } : {}) }); });
+    // The result comes at the close, on every path, so the child is reaped first.
+    child.once("close", code => {
+      release();
+      if (unwritten) reject(unwritten);
+      else resolvePromise({ code: overflow ? 1 : code ?? 1, stdout, stderr, ...(overflow ? { overflow } : {}) });
+    });
   });
 }
 
@@ -127,10 +138,19 @@ async function checkStaging(directory: string, root = directory): Promise<void> 
  * Unpack an archive that `docker cp CONTAINER:PATH -` wrote. `top` is the last part of PATH: every entry
  * must be that file or directory, or lie below it. Only regular files and directories are written, with
  * fixed modes and the current user as owner. No link is ever created, so a link in the volume cannot
- * redirect a later write. Everything else is returned as omitted.
+ * redirect a later write. Docker stores the second name of a hard-linked file as a link entry. Such a name gets a
+ * copy of the file, as a new regular file, when this archive held the file. Everything else is returned as omitted.
  */
 export async function unpack(archive: string, destination: string, top: string, strip: 0 | 1): Promise<RunRecord["omitted"]> {
   const omitted: RunRecord["omitted"] = [], foreign: string[] = [];
+  // The regular files that this read wrote, and the hard-link entries, both as paths below the destination.
+  const written = new Set<string>(), links: Array<{ path: string; target: string | null }> = [];
+  const split = (path: string) => path.split("/").filter(part => part && part !== ".");
+  /** The path below the destination, or null for a path that is absolute, leaves `top` or names nothing below it. */
+  const below = (path: string) => {
+    const parts = split(path);
+    return path.startsWith("/") || parts[0] !== top || parts.includes("..") || parts.length <= strip ? null : parts.slice(strip).join("/");
+  };
   await mkdir(destination, { recursive: true });
   await extractTar({
     file: archive, cwd: destination, strip, preserveOwner: false,
@@ -138,12 +158,13 @@ export async function unpack(archive: string, destination: string, top: string, 
     strict: true,
     filter: (path, stats) => {
       const entry = stats as ReadEntry;
-      const parts = path.split("/").filter(part => part && part !== ".");
+      const parts = split(path);
       if (parts[0] !== top) { foreign.push(path); return false; }
       if (entry.type === "Directory") entry.mode = 0o755;
-      else if (entry.type === "File" || entry.type === "OldFile" || entry.type === "ContiguousFile") entry.mode = 0o644;
+      else if (entry.type === "File" || entry.type === "OldFile" || entry.type === "ContiguousFile") { entry.mode = 0o644; const name = below(path); if (name) written.add(name); }
+      else if (entry.type === "Link") { links.push({ path: parts.slice(strip).join("/") || ".", target: below(path) && below(entry.linkpath ?? "") }); return false; }
       else {
-        const kind = entry.type === "SymbolicLink" ? "symbolic link" : entry.type === "Link" ? "hard link" : "special file";
+        const kind = entry.type === "SymbolicLink" ? "symbolic link" : "special file";
         omitted.push({ path: parts.slice(strip).join("/") || ".", reason: `${kind} excluded; the original stays in the Docker volume` });
         return false;
       }
@@ -151,6 +172,14 @@ export async function unpack(archive: string, destination: string, top: string, 
     },
   });
   if (foreign.length) throw new Error(`Unexpected entry in the archive from Docker: ${foreign[0]}`);
+  for (const link of links) {
+    // The bytes are copied to a new regular file: no link is made. An existing path is never replaced.
+    const from = link.target !== null && written.has(link.target) ? join(destination, link.target) : null, to = join(destination, link.path);
+    const copied = from !== null && !!(await lstat(from).catch(() => null))?.isFile()
+      && await mkdir(dirname(to), { recursive: true }).then(() => copyFile(from, to, constants.COPYFILE_EXCL)).then(() => chmod(to, 0o644)).then(() => true, () => false);
+    if (copied) written.add(link.path);
+    else omitted.push({ path: link.path, reason: "hard link excluded; the original stays in the Docker volume" });
+  }
   return omitted;
 }
 
@@ -351,17 +380,19 @@ export class DockerExecutor implements Executor {
       await stageRuntime(staging, this.root);
       await checkStaging(staging);
     } catch (error) { throw new LaunchNotStarted(error); } // Nothing was created for the run.
-    const start = await mkdtemp(join(tmpdir(), "ultrafuzz-start-"));
+    // A private directory: the two start files, and their archive beside them. No file of a launch has a name that another user of this machine can make first.
+    const start = await mkdtemp(join(tmpdir(), "ultrafuzz-start-")), files = join(start, "files");
     try {
       await this.must(["volume", "create", "--label", `${RUN_LABEL}=${record.id}`, "--label", `${SCHEMA_LABEL}=${SCHEMA}`, docker.volume_name]);
       const created = (await this.must(createArguments(record.id, docker, image), { env: { OPENROUTER_API_KEY: key } })).split(/\s+/).pop() ?? "";
       // The container is not started yet: its store is filled first, so the worker never sees a partial store.
-      // The archive can be large, so it is written next to the staging directory, not to the system temporary directory.
+      // This archive can be large, so it is written next to the staging directory, not to the system temporary directory.
       await this.upload(docker.container_name, staging, `${staging}.tar`);
       const job = await startingJob(staging, docker.timeout_seconds);
-      await writeFile(join(start, "job.json"), JSON.stringify(job), { mode: 0o644 });
-      await writeFile(join(start, "run.json"), JSON.stringify(job.record), { mode: 0o644 });
-      await this.upload(docker.container_name, start, `${start}.tar`);
+      await mkdir(files);
+      await writeFile(join(files, "job.json"), JSON.stringify(job), { mode: 0o644 });
+      await writeFile(join(files, "run.json"), JSON.stringify(job.record), { mode: 0o644 });
+      await this.upload(docker.container_name, files, join(start, "start.tar"));
       await this.must(["start", docker.container_name]);
       return /^[a-f0-9]{12,64}$/.test(created) ? created : docker.container_name;
     } catch (error) {
@@ -383,7 +414,7 @@ export class DockerExecutor implements Executor {
     } catch (error) {
       // As on Modal: the run then ends as a run without a record, so the core can still collect its outputs. Every other error stays an error.
       if (!damaged(error)) throw error;
-      // A run that the host has already ended got this line when it ended.
+      // A run that the host has already ended got this line when it ended, except a run that ended as lost: no store was read then.
       if (record.state !== "finished") process.stderr.write(`The completion record of run ${record.id} cannot be used (${error.message}). The run is handled as a run without one.\n`);
     }
     if (complete && complete.id !== record.id) throw new Error("Completion record belongs to another run");

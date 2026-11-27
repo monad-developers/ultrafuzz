@@ -1,8 +1,8 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import { chmod, mkdir, readFile, readdir, readlink, rm, stat } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ModalClient, NotFoundError, SandboxFilesystemFileTooLargeError, SandboxFilesystemNotFoundError, type App, type Image, type Sandbox, type Volume } from "modal";
 import { c as createTar, t as listTar, x as extractTar, type ReadEntry } from "tar";
 import { LaunchNotStarted, RUN_ROOT, WORKER_COMMAND, stageRuntime, startingJob, storedRecord, unansweredRequest, type Executor, type Observation } from "./executor";
@@ -22,6 +22,14 @@ const GRACE_SECONDS = 300;
 const EXIT_SLACK_SECONDS = 60;
 /** A helper sandbox only fills or reads a store. Modal ends it after this time, also when this process is gone. */
 const HELPER_SECONDS = 1800;
+/** The helper that packs and copies the outputs of a run gets more time: the time of a collection grows with the outputs. */
+const COLLECT_SECONDS = 6 * 3600;
+/** The longest wait for one command in a helper sandbox, in milliseconds. */
+const COMMAND_LIMIT = 900_000;
+/** The longest wait for the command that packs the outputs of a run, in milliseconds. */
+const PACK_LIMIT = 2 * 3_600_000;
+/** The copy of the outputs must end this long before Modal ends its helper, in milliseconds. A copy has no limit of its own in the SDK. */
+const COPY_MARGIN = 5 * 60_000;
 const HELPER_IMAGE = "debian:bookworm-slim";
 /** The staged run travels as one archive. It is unpacked from the helper's own disk, not from the store. */
 const ARCHIVE = "/tmp/ultrafuzz-staging.tar";
@@ -75,10 +83,10 @@ async function sha256(path: string): Promise<string> {
   return hash.digest("hex");
 }
 
-/** Run a command in a sandbox and fail on a non-zero exit. */
-async function must(sandbox: Sandbox, command: string[], failure: string): Promise<void> {
+/** Run a command in a sandbox and fail on a non-zero exit. `limit` is the longest wait in milliseconds. */
+async function must(sandbox: Sandbox, command: string[], failure: string, limit = COMMAND_LIMIT): Promise<void> {
   // Without a time limit the SDK waits forever when the sandbox ends under the command.
-  const child = await sandbox.exec(command, { stdout: "ignore", timeoutMs: 900_000 });
+  const child = await sandbox.exec(command, { stdout: "ignore", timeoutMs: limit });
   const code = await child.wait();
   if (code === 0) return;
   const detail = (await child.stderr.readText().catch(() => "")).trim().slice(-500);
@@ -173,9 +181,12 @@ export class ModalExecutor implements Executor {
   private readonly images = new Map<string, Promise<Image>>();
   /** When the store of a running sandbox was last looked at, by run ID. */
   private readonly looked = new Map<string, number>();
+  /** The runs for which this executor wrote that Modal does not know their sandbox. One line for each row of such answers, as in the core. */
+  private readonly unknown = new Set<string>();
   /** `settle` is the pause in milliseconds between two looks for a completion record that is not visible yet, and between two tries of an image build. */
   /** `look` is the longest wait in milliseconds for one look at a file in a running worker sandbox. */
-  constructor(private readonly connect: () => ModalClient = sharedClient, private readonly root: string = ROOT, private readonly settle = 5000, private readonly part = PART_SIZE, private readonly look = LOOK_LIMIT) {
+  /** `copy` is the longest time in milliseconds for the copy of the outputs of a run, from the start of its helper. */
+  constructor(private readonly connect: () => ModalClient = sharedClient, private readonly root: string = ROOT, private readonly settle = 5000, private readonly part = PART_SIZE, private readonly look = LOOK_LIMIT, private readonly copy = COLLECT_SECONDS * 1000 - COPY_MARGIN) {
     if (!/^[1-9]\d*[KMG]?$/.test(part)) throw new Error("Invalid archive part size");
   }
 
@@ -232,17 +243,17 @@ export class ModalExecutor implements Executor {
     return image;
   }
 
-  /** Run `use` in a short-lived sandbox that mounts a store. The sandbox is stopped on every path. */
-  private async helper<T>(app: App, store: Volume, write: boolean, use: (sandbox: Sandbox) => Promise<T>): Promise<T> {
+  /** Run `use` in a short-lived sandbox that mounts a store. The sandbox is stopped on every path. Modal ends it after `seconds`. */
+  private async helper<T>(app: App, store: Volume, write: boolean, use: (sandbox: Sandbox) => Promise<T>, seconds = HELPER_SECONDS): Promise<T> {
     const sandbox = await this.modal.sandboxes.create(app, this.modal.images.fromRegistry(HELPER_IMAGE), {
-      command: ["sleep", String(HELPER_SECONDS)], cpu: 0.25, memoryMiB: 256, timeoutMs: HELPER_SECONDS * 1000,
+      command: ["sleep", String(seconds)], cpu: 0.25, memoryMiB: 256, timeoutMs: seconds * 1000,
       volumes: { [RUN_ROOT]: write ? store : store.withMountOptions({ readOnly: true }) },
     });
     try { return await use(sandbox); }
     finally {
       // A writer is awaited: Modal commits the Volume again when the sandbox ends. A failed stop must not hide the first error.
       try { if (write) await sandbox.terminate({ wait: true }); else await sandbox.terminate(); }
-      catch (error) { process.stderr.write(`Could not stop Modal helper sandbox ${sandbox.sandboxId}; Modal ends it within ${HELPER_SECONDS / 60} minutes. ${error instanceof Error ? error.message : String(error)}\n`); }
+      catch (error) { process.stderr.write(`Could not stop Modal helper sandbox ${sandbox.sandboxId}; Modal ends it within ${seconds / 60} minutes. ${error instanceof Error ? error.message : String(error)}\n`); }
       sandbox.detach();
     }
   }
@@ -361,7 +372,7 @@ export class ModalExecutor implements Executor {
             catch (error) {
               // The run then ends as a run without a record, so the core can still collect its outputs. Every other error can pass, and stays an error.
               if (!damaged(error)) throw error;
-              // A run that the host has already ended got this line when it ended.
+              // A run that the host has already ended got this line when it ended, except a run that ended as lost: no store was read then.
               if (record.state !== "finished") process.stderr.write(`The completion record of run ${record.id} cannot be used (${error.message}). The run is handled as a run without one.\n`);
               break;
             }
@@ -390,7 +401,11 @@ export class ModalExecutor implements Executor {
       } catch { /* The outputs in the store can still tell more. */ }
     } finally { sandbox?.detach(); }
     if (complete && complete.id !== record.id) throw new Error("Completion record belongs to another run");
-    if (code === undefined && config.runtime_id && !complete) {
+    // One line for a row of such answers, not one for each poll: `wait` asks every 5 seconds. An answer that knows the
+    // run arms the line again, so a process that lives long, such as the dashboard, writes it for the next row too.
+    if (code !== undefined || !config.runtime_id || complete) this.unknown.delete(record.id);
+    else if (!this.unknown.has(record.id)) {
+      this.unknown.add(record.id);
       process.stderr.write(`Modal does not know sandbox ${config.runtime_id} of run ${record.id} in app ${config.app}, environment ${config.environment ?? this.modal.profile.environment ?? "(default)"}. A run that was launched from another Modal workspace or environment is not visible with this profile.\n`);
     }
     return { code, runtime_id: sandbox?.sandboxId ?? config.runtime_id ?? undefined, complete };
@@ -400,25 +415,55 @@ export class ModalExecutor implements Executor {
     const config = handles(record);
     const store = await this.store(config, config.volume_name);
     if (!store) throw new Error(`Modal Volume ${config.volume_name} was not found. The outputs of run ${record.id} cannot be collected.`);
+    const kept = `They stay in Modal Volume ${config.volume_name}.`;
+    // Modal ends the helper after COLLECT_SECONDS. The copy must end before that: the SDK waits without a limit when the sandbox ends under it.
+    const stopAt = Date.now() + this.copy;
     return this.helper(await this.app(config), store, false, async sandbox => {
-      const archive = `${destination}.tar`;
+      // Each collection has its own name for the part: a copy of an earlier collection that ends late cannot replace the part of this one.
+      const archive = `${destination}.tar`, part = `${archive}.${randomBytes(4).toString("hex")}.part`;
+      // The temporary files of this collection, and of an earlier one whose process ended in a copy: the parts, and
+      // the files that the SDK writes beside them before it renames them. One collection works on a run at a time.
+      const sweep = async () => {
+        const directory = dirname(archive), prefix = `${basename(archive)}.`;
+        for (const name of await readdir(directory).catch(() => [])) {
+          if (name.startsWith(".modal-sandbox-fs-tmp-") || (name.startsWith(prefix) && name.endsWith(".part"))) await rm(join(directory, name), { force: true });
+        }
+      };
       // The directory exists before the copy: after a failure the SDK removes a directory that it had to create.
       await mkdir(destination, { recursive: true });
       try {
         // One archive: the time does not grow with the number of files, as it does with a round trip for each file.
-        await must(sandbox, ["sh", "-c", pack(this.part), "sh", OUTPUTS, `${RUN_ROOT}/outputs`], "Could not pack the run outputs");
+        try { await must(sandbox, ["sh", "-c", pack(this.part), "sh", OUTPUTS, `${RUN_ROOT}/outputs`], "Could not pack the run outputs", PACK_LIMIT); }
+        catch (error) {
+          // The SDK names no cause when the time limit of a command ends.
+          if (error instanceof Error && /deadline exceeded/i.test(error.message)) throw new Error(`The outputs of run ${record.id} were not packed in ${PACK_LIMIT / 60_000} minutes. ${kept}`);
+          throw error;
+        }
         // The parts are joined on this machine. The first part always exists; the copy that finds no part ends the loop.
         for (let index = 0; ; index++) {
-          try { await sandbox.filesystem.copyToLocal(`${OUTPUTS}.${String(index).padStart(4, "0")}`, `${archive}.part`); }
-          catch (error) { if (index > 0 && error instanceof SandboxFilesystemNotFoundError) break; throw error; }
-          await pipeline(createReadStream(`${archive}.part`), createWriteStream(archive, { flags: index ? "a" : "w" }));
+          try {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const request = sandbox.filesystem.copyToLocal(`${OUTPUTS}.${String(index).padStart(4, "0")}`, part);
+            const done = await Promise.race([
+              request.then(() => true),
+              new Promise<false>(late => { timer = setTimeout(() => late(false), Math.max(0, stopAt - Date.now())); }),
+            ]).finally(() => clearTimeout(timer));
+            if (!done) {
+              // The request stays open. It is recorded, so a command that has printed its result can end the process.
+              // When it ends after all, it can have written its part after the clean-up below, so the part is removed again.
+              const answered = unansweredRequest();
+              void request.catch(() => undefined).finally(() => { answered(); return rm(part, { force: true }); });
+              throw new Error(`The outputs of run ${record.id} were not copied in ${Math.round(this.copy / 60_000)} minutes. ${kept}`);
+            }
+          } catch (error) { if (index > 0 && error instanceof SandboxFilesystemNotFoundError) break; throw error; }
+          await pipeline(createReadStream(part), createWriteStream(archive, { flags: index ? "a" : "w" }));
         }
         return await unpack(archive, destination);
       } catch (error) {
         if (error instanceof SandboxFilesystemFileTooLargeError) throw new Error(`A part of the outputs archive of run ${record.id} is too large to copy. The outputs stay in Modal Volume ${config.volume_name}.`);
         throw error;
-      } finally { await rm(archive, { force: true }); await rm(`${archive}.part`, { force: true }); }
-    });
+      } finally { await rm(archive, { force: true }); await sweep(); }
+    }, COLLECT_SECONDS);
   }
 
   async cancel(record: RunRecord): Promise<boolean> {

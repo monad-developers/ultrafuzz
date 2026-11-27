@@ -6,6 +6,7 @@ import { create as createTar } from "tar";
 import { environmentSecrets, redactText } from "./artifacts";
 import type { InputRecord } from "./types";
 
+/** Names of credential stores, caches and Git metadata. No file or directory with such a name is copied, at any depth, also when a commit tracks it. The README lists the names. */
 const excluded = new Set([".git", ".git-credentials", ".netrc", ".ssh", ".aws", ".env", ".npmrc", ".pypirc", ".cache", ".npm", "node_modules", "__pycache__", ".pytest_cache"]);
 const pointerPrefix = "version https://git-lfs.github.com/spec/v1\n";
 
@@ -39,10 +40,15 @@ async function git(args: string[], cwd: string, input?: string): Promise<string>
   return stdout;
 }
 
-/** Follow link components only for validation; never read a target outside the supplied tree. */
-async function safeLink(root: string, path: string, depth = 0): Promise<void> {
-  if (depth > 40 || !inside(root, path) || relative(root, path).split(sep).some((part) => excluded.has(part)))
-    throw new Error("Input symlink escapes its tree, loops, or points into excluded metadata");
+/**
+ * Follow link components only for validation; never read a target outside the supplied tree. `name` is the path of
+ * the link in the tree, for the error text. With `clone`, the tree is a fresh clone: it holds no file of this
+ * machine, and the snapshot leaves the excluded names out. So a link to such a name, for example into node_modules,
+ * only has no target, and it is kept. A link into Git metadata is always refused.
+ */
+async function safeLink(root: string, path: string, name: string, clone = false, depth = 0): Promise<void> {
+  if (depth > 40 || !inside(root, path) || relative(root, path).split(sep).some((part) => clone ? part === ".git" : excluded.has(part)))
+    throw new Error(`Input symlink ${name} escapes its tree, loops, or points into excluded metadata`);
   const parts = relative(root, path).split(sep).filter(Boolean);
   let cursor = root;
   for (let i = 0; i < parts.length; i++) {
@@ -51,21 +57,27 @@ async function safeLink(root: string, path: string, depth = 0): Promise<void> {
     try { info = await lstat(cursor); } catch (error: any) { if (error.code === "ENOENT") continue; throw error; }
     if (info.isSymbolicLink()) {
       const target = await readlink(cursor);
-      if (isAbsolute(target)) throw new Error("Input contains an absolute symlink");
-      return safeLink(root, resolve(dirname(cursor), target, ...parts.slice(i + 1)), depth + 1);
+      if (isAbsolute(target)) throw new Error(`Input contains an absolute symlink: ${name}`);
+      return safeLink(root, resolve(dirname(cursor), target, ...parts.slice(i + 1)), name, clone, depth + 1);
     }
   }
 }
 
-async function copyTree(source: string, destination: string, root = source): Promise<void> {
+/**
+ * Copy a tree without the excluded names. `clone` is set for the fresh clone of the audited source: each path of
+ * the commit that is left out is added to `clone.skipped`, and a link to an excluded name is kept (see safeLink).
+ */
+async function copyTree(source: string, destination: string, root = source, clone?: { skipped: string[] }): Promise<void> {
   const info = await lstat(source);
   if (info.isSymbolicLink()) {
-    await safeLink(root, source);
+    await safeLink(root, source, relative(root, source), !!clone);
     await symlink(await readlink(source), destination);
   } else if (info.isDirectory()) {
     await mkdir(destination, { recursive: true });
     for (const name of (await readdir(source)).sort()) {
-      if (!excluded.has(name)) await copyTree(join(source, name), join(destination, name), root);
+      if (!excluded.has(name)) await copyTree(join(source, name), join(destination, name), root, clone);
+      // Git writes `.git` itself. Every other entry of a fresh clone comes from the commit or from a submodule of it.
+      else if (name !== ".git") clone?.skipped.push(relative(root, join(source, name)));
     }
     await chmod(destination, 0o755);
   } else if (info.isFile()) {
@@ -106,7 +118,8 @@ async function materializeLfs(root: string): Promise<void> {
   }
 }
 
-async function prepareRepository(repository: string, revision: string | undefined, destination: string) {
+/** `skipped`, when given, gets each path of the commit that the snapshot leaves out. It also keeps links to excluded names. */
+async function prepareRepository(repository: string, revision: string | undefined, destination: string, skipped?: string[]) {
   const remote = repositoryUrl(repository);
   if (revision && (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(revision) || revision.includes(".."))) throw new Error("Invalid repository revision");
   destination = resolve(destination);
@@ -125,7 +138,7 @@ async function prepareRepository(repository: string, revision: string | undefine
     }
     const commit = (await git(["rev-parse", "HEAD"], checkout)).trim();
     await materializeLfs(checkout);
-    await copyTree(checkout, clean);
+    await copyTree(checkout, clean, checkout, skipped && { skipped });
     const archive = join(destination, "source.tar.gz"), stagedArchive = join(temporary, "source.tar.gz");
     await createTar({ cwd: clean, file: stagedArchive, gzip: true, portable: true, mtime: new Date(0) }, ["."]);
     const workspace = join(destination, "workspace");
@@ -136,10 +149,14 @@ async function prepareRepository(repository: string, revision: string | undefine
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
 
-/** Scope constrains the prompt, not source files needed to build or test the project. */
-export async function prepareSource(repository: string, _scope: string | undefined, destination: string, revision?: string): Promise<{ archive: string; commit: string }> {
-  const { archive, commit } = await prepareRepository(repository, revision, destination);
-  return { archive, commit };
+/**
+ * Scope constrains the prompt, not source files needed to build or test the project.
+ * `excluded` lists the paths of the commit that the snapshot leaves out because of their names.
+ */
+export async function prepareSource(repository: string, _scope: string | undefined, destination: string, revision?: string): Promise<{ archive: string; commit: string; excluded: string[] }> {
+  const skipped: string[] = [];
+  const { archive, commit } = await prepareRepository(repository, revision, destination, skipped);
+  return { archive, commit, excluded: skipped };
 }
 
 export async function prepareDependency(repository: string, revision: string | undefined, destination: string): Promise<{ archive: string; commit: string; checkout: string }> {

@@ -51,7 +51,7 @@ class Cloud implements Executor {
     const remote = this.records.get(record.id)!;
     return { code: remote.state === "finished" ? 0 : null, runtime_id: `sb-${record.id}`, complete: remote.state === "finished" ? remote : null };
   }
-  async download(record: RunRecord, destination: string) {
+  async download(record: RunRecord, destination: string): Promise<RunRecord["omitted"]> {
     this.downloads++;
     await this.onDownload?.();
     if (this.downloadFailure) throw new Error(this.downloadFailure);
@@ -67,10 +67,11 @@ class Cloud implements Executor {
   known = true;
   async cancel(record: RunRecord) { this.cancelled.push(record.id); return this.known; }
   async recover(_config: Config, id?: string) { return [...this.records.values()].filter(record => !id || record.id === id).map(record => structuredClone(record)); }
-  finish(id: string, report?: string) {
+  /** `end` is what the worker wrote. A worker that a stop request reached writes "cancelled" itself. */
+  finish(id: string, report?: string, end: RunRecord["end"] = "completed", code = 0) {
     const record = this.records.get(id)!;
     record.state = "finished"; record.status = report?.trim() ? "succeeded" : "failed";
-    record.end = "completed"; record.exit_code = 0; record.finished_at = new Date().toISOString();
+    record.end = end; record.exit_code = code; record.finished_at = new Date().toISOString();
     if (report !== undefined) this.reports.set(id, report);
   }
 }
@@ -175,7 +176,7 @@ test("a run without a report is collected and has no report path", async () => {
 });
 
 test("a collection failure is recorded in collection, not in publication, and can be retried", async () => {
-  const { cloud, engine, attempts } = await fixture();
+  const { home, cloud, engine, attempts } = await fixture();
   const run = await engine.launch({ repository: "example", label: "broken", publish: true });
   cloud.finish(run.id, "# Report");
   cloud.downloadFailure = "Simulated transport failure";
@@ -197,11 +198,26 @@ test("a collection failure is recorded in collection, not in publication, and ca
   expect(done.collection.error).toBeUndefined();
   expect(done.publication.state).toBe("published");
   expect(attempts()).toBe(1);
-  // A later forced collection that fails keeps the paths of the intact earlier package.
+  // A later forced collection that fails keeps the intact earlier package, and it does not change the record: the
+  // run stays settled. The store can be gone for good, and a run with a failed collection would then never settle.
   cloud.downloadFailure = "Store is gone";
-  const stale = await engine.collect(run.id, true);
-  expect(stale.collection).toMatchObject({ state: "failed", path: done.collection.path, report: done.collection.report, error: "Store is gone" });
+  const downloads = cloud.downloads;
+  await expect(engine.collect(run.id, true)).rejects.toThrow(`Run ${run.id}: the forced collection failed (Store is gone). The earlier package is kept, and the record is not changed.`);
+  expect(cloud.downloads).toBe(downloads + 1);
+  const stale = await readRun(home, run.id);
+  expect(stale).toEqual(done);
+  expect(settled(stale)).toBe(true);
   expect(await readFile(stale.collection.report!, "utf8")).toContain("# Report");
+  // No later command works on the run again, and a watch without IDs does not take it.
+  expect(await engine.status(run.id)).toEqual(done);
+  expect(await engine.collect(run.id)).toEqual(done);
+  expect(await engine.watch({ once: true })).toEqual([]);
+  expect([cloud.downloads, attempts()]).toEqual([downloads + 1, 1]);
+  // A forced collection of a run whose collection had already failed still records the failure.
+  const broken = await engine.launch({ repository: "example", label: "broken" });
+  cloud.finish(broken.id, "# Report");
+  expect((await engine.status(broken.id)).collection.state).toBe("failed");
+  expect((await engine.collect(broken.id, true)).collection).toEqual({ state: "failed", path: null, report: null, error: "Store is gone" });
 });
 
 test("publication is opt-in and needs a configured results repository", async () => {
@@ -296,7 +312,45 @@ test("wait keeps polling after a failed status call and gives up only after a lo
       return status(id);
     };
     expect((await engine.wait(busy.id, { interval: 1 })).state).toBe("finished");
-    expect(lines).toEqual([`Run ${busy.id}: another command is working on this run. Still waiting; this command tries again for up to 10 minutes.\n`]);
+    expect(lines).toEqual([`Run ${busy.id}: another command is working on this run. Still waiting; this command tries again for up to 120 minutes.\n`]);
+
+    // A long collection by another command holds the lock for longer than the 10 minutes of other failures. That does
+    // not end the wait. The line comes again each ten minutes, and the wait returns the record when the lock is free.
+    const held = await engine.launch({ repository: "example", label: "held" });
+    lines.length = 0;
+    let tries = 0;
+    engine.status = async id => {
+      setSystemTime(new Date(Date.now() + 4 * 60_000));
+      if (++tries <= 8) throw Object.assign(new Error("Lock file is already being held"), { code: "ELOCKED" });
+      cloud.finish(held.id, "# Report");
+      return status(id);
+    };
+    expect((await engine.wait(held.id, { interval: 1 })).collection.state).toBe("collected");
+    expect(tries).toBe(9);
+    // Polls 1 to 8 are 4 minutes apart: the line is written at polls 1, 4 and 7.
+    expect(lines).toEqual(Array(3).fill(`Run ${held.id}: another command is working on this run. Still waiting; this command tries again for up to 120 minutes.\n`));
+    // A holder that never frees the lock does not hold the wait for ever. The last error names the run and the cause.
+    const stuck = await engine.launch({ repository: "example", label: "stuck" });
+    polls = 0;
+    // A wait that does not give up gets an end after 100 polls, so a fault here fails this test and does not hold the others.
+    const ended = (run: RunRecord): RunRecord => ({ ...run, state: "finished" });
+    engine.status = async () => { if (++polls > 100) return ended(stuck); setSystemTime(new Date(Date.now() + 30 * 60_000)); throw Object.assign(new Error("Lock file is already being held"), { code: "ELOCKED" }); };
+    await expect(engine.wait(stuck.id, { interval: 1 })).rejects.toThrow(`Run ${stuck.id}: another command is working on this run.`);
+    // Polls are 30 minutes apart: poll 5 is the first that is 2 hours after poll 1.
+    expect(polls).toBe(5);
+    // A busy lock between other failures starts their count again, and the lock time has its own, longer limit.
+    const mixed = await engine.launch({ repository: "example", label: "mixed" });
+    lines.length = 0; polls = 0;
+    engine.status = async () => {
+      if (++polls > 100) return ended(mixed);
+      setSystemTime(new Date(Date.now() + 6 * 60_000));
+      throw polls % 2 ? new Error(`failure ${polls}`) : Object.assign(new Error("Lock file is already being held"), { code: "ELOCKED" });
+    };
+    await expect(engine.wait(mixed.id, { interval: 1 })).rejects.toThrow(`Run ${mixed.id}: `);
+    // No row of other failures reaches 10 minutes, so the 2 hours of failed polls end the wait: poll 21 is 120 minutes after poll 1.
+    expect(polls).toBe(21);
+    // One line for the row of failed polls, and one for the lock each ten minutes.
+    expect(lines.filter(line => line.includes("the status check failed"))).toEqual([`Run ${mixed.id}: the status check failed (failure 1). Still waiting; this command tries again for up to 10 minutes.\n`]);
     engine.status = status;
 
     // A success between failures starts the count again. Failures only, for the whole time, end the wait with the last error.
@@ -309,7 +363,7 @@ test("wait keeps polling after a failed status call and gives up only after a lo
       throw new Error(`failure ${polls}`);
     };
     // Polls 1 and 2 fail, 4 minutes apart. Poll 3 works. Polls 4 to 7 fail: poll 7 is the first that is 10 minutes or more after poll 4.
-    await expect(engine.wait(lost.id, { interval: 1 })).rejects.toThrow("failure 7");
+    await expect(engine.wait(lost.id, { interval: 1 })).rejects.toThrow(`Run ${lost.id}: the status check failed (failure 7).`);
     expect(polls).toBe(7);
     expect(lines).toHaveLength(2);
   } finally { process.stderr.write = write; cloud.observe = observe; }
@@ -755,7 +809,8 @@ test("cancellation and missing delivery remain distinct from successful publicat
   const { cloud, engine } = await fixture();
   const run = await engine.launch({ repository: "example", label: "cancel", publish: true });
   await engine.cancel(run.id);
-  cloud.finish(run.id);
+  // The stop request reached the worker, so the worker wrote the end "cancelled" itself.
+  cloud.finish(run.id, undefined, "cancelled", 143);
   const result = await engine.status(run.id);
   expect(cloud.cancelled).toEqual([run.id]);
   expect(result.end).toBe("cancelled");
@@ -764,13 +819,39 @@ test("cancellation and missing delivery remain distinct from successful publicat
   expect(result.publication.state).toBe("published");
 });
 
+test("a cancel that comes after the worker ended does not change what the worker recorded", async () => {
+  const { home, cloud, engine } = await fixture({ results: false });
+  // Both executors answer "known" for a runtime that has ended, so the request is recorded. The worker never saw it.
+  for (const [end, code, report] of [["completed", 0, "# Report"], ["timeout", 124, undefined], ["error", 1, undefined]] as const) {
+    const run = await engine.launch({ repository: "example", label: `late-${end}` });
+    expect((await engine.status(run.id)).state).toBe("running");
+    cloud.finish(run.id, report, end, code);
+    expect(await engine.cancel(run.id)).toMatchObject({ state: "running", end: "cancelled" });
+    const result = await engine.status(run.id);
+    expect(result).toMatchObject({ state: "finished", status: report ? "succeeded" : "failed", end, exit_code: code, collection: { state: "collected" } });
+    expect(await readFile(join(home, "runs", run.id, "artifacts/run.yml"), "utf8")).toContain(`end: ${end}\n`);
+  }
+  // A cancel that arrives while the executor is asked, for a worker that has its record: the worker has the last word.
+  const racing = await engine.launch({ repository: "example", label: "racing" });
+  cloud.finish(racing.id, "# Report");
+  const observe = cloud.observe.bind(cloud);
+  cloud.observe = async record => { const seen = await observe(record); await engine.cancel(racing.id); return seen; };
+  expect(await engine.status(racing.id)).toMatchObject({ state: "finished", status: "succeeded", end: "completed" });
+  cloud.observe = observe;
+  // The same race for a run that still runs keeps the request: the executor reads it from the record.
+  const running = await engine.launch({ repository: "example", label: "running" });
+  cloud.observe = async record => { const seen = await observe(record); await engine.cancel(running.id); return seen; };
+  expect(await engine.status(running.id)).toMatchObject({ state: "running", end: "cancelled" });
+  cloud.observe = observe;
+});
+
 test("cancellation arriving during submission reaches the accepted sandbox", async () => {
   const { cloud, engine } = await fixture();
   cloud.onLaunch = async record => { await engine.cancel(record.id); };
   const run = await engine.launch({ repository: "example", label: "cancel-submission" });
   expect(run.end).toBe("cancelled");
   expect(cloud.cancelled).toEqual([run.id, run.id]);
-  cloud.finish(run.id, "# Partial delivery");
+  cloud.finish(run.id, "# Partial delivery", "cancelled", 143);
   const result = await engine.status(run.id);
   expect(result.status).toBe("succeeded");
   expect(result.end).toBe("cancelled");
@@ -1230,6 +1311,98 @@ test("a late completion record does not open the publication of a run whose pull
   const never = await engine.launch({ repository: "example", label: "never", publish: true });
   cloud.finish(never.id, "# Report");
   expect(await stderrLines(async () => { expect((await engine.status(never.id)).publication).toMatchObject({ state: "failed", pr_url: null }); })).toEqual([]);
+
+  // The record can be without the URL of a pull request that exists and was merged: a recovered run, or a first
+  // publication that failed after the request was made. The publisher names the request, and the run settles with it.
+  const recovered = await engine.launch({ repository: "example", label: "recovered", publish: true });
+  const request = "https://github.com/owner/private-results/pull/41";
+  publicationFailure(new ResultsMerged(recovered.id, request));
+  cloud.finish(recovered.id, "# Report");
+  let closed!: RunRecord;
+  expect(await stderrLines(async () => { closed = await engine.status(recovered.id); })).toEqual([
+    `Run ${recovered.id}: the pull request of this run was merged (${request}), and the new package differs from the merged files. The merged files stay as they are. The new package is on this machine only: ${join(home, "runs", recovered.id, "artifacts")}\n`,
+  ]);
+  expect(closed.publication).toMatchObject({ state: "published", pr_url: request, error: new ResultsMerged(recovered.id).message });
+  expect(settled(closed)).toBe(true);
+});
+
+test("an output that is not a regular file does not block the collection, except the transcript", async () => {
+  const { home, cloud, engine } = await fixture({ results: false });
+  const download = cloud.download.bind(cloud);
+  const omit = (...omitted: RunRecord["omitted"]) => { cloud.download = async (record, destination) => { await download(record, destination); return omitted; }; };
+  const link = "symbolic link excluded; the original stays in the Docker volume";
+  // The agent made report.md as a link, so the executor left it out. The run has no report. It is collected, and the record says why.
+  const linked = await engine.launch({ repository: "example", label: "linked" });
+  cloud.finish(linked.id);
+  omit({ path: "raw/report.md", reason: link });
+  const none = await engine.status(linked.id);
+  expect(none).toMatchObject({ state: "finished", status: "failed", collection: { state: "collected", report: null } });
+  expect(none.omitted).toContainEqual({ path: "raw/report.md", reason: link });
+  expect(await readFile(join(home, "runs", linked.id, "artifacts/run.yml"), "utf8")).toContain("path: raw/report.md");
+  expect(settled(none)).toBe(true);
+  expect(cloud.downloads).toBe(1);
+  // A link with the name of a report or of a transcript at another place is only listed. The real report is collected.
+  const deep = await engine.launch({ repository: "example", label: "deep" });
+  cloud.finish(deep.id, "# Report");
+  omit({ path: "raw/pareto/latest/report.md", reason: link }, { path: "raw/old/transcript.jsonl", reason: link });
+  const good = await engine.status(deep.id);
+  expect(good).toMatchObject({ status: "succeeded", collection: { state: "collected", report: join(home, "runs", deep.id, "artifacts/raw/report.md") } });
+  expect(good.omitted.map(item => item.path)).toEqual(["raw/old/transcript.jsonl", "raw/pareto/latest/report.md"]);
+  // The transcript of the worker is evidence that every run has. Without it the collection fails.
+  for (const path of ["raw/transcript.jsonl", "raw/transcript.jsonl.gz"]) {
+    const run = await engine.launch({ repository: "example", label: "evidence" });
+    cloud.finish(run.id, "# Report");
+    omit({ path, reason: link });
+    expect((await engine.status(run.id)).collection).toMatchObject({ state: "failed", error: "A mandatory artifact could not be collected. Original outputs remain in the run store." });
+  }
+  cloud.download = download;
+});
+
+test("a run ID that the workspace does not have gives one clear error and leaves no directory", async () => {
+  const { home, cloud, engine } = await fixture({ results: false });
+  const unknown = "20261127-120000-deadbeef", text = `Run ${unknown} was not found in ${join(home, "runs")}. Use ultrafuzz list to see the runs of this workspace.`;
+  // The registry directory itself is absent.
+  await rm(join(home, "runs"), { recursive: true, force: true });
+  for (const call of [() => engine.status(unknown), () => engine.collect(unknown), () => engine.collect(unknown, true), () => engine.cancel(unknown), () => engine.wait(unknown)]) {
+    await expect(call()).rejects.toThrow(text);
+  }
+  expect(await readdir(home)).not.toContain("runs");
+  // With other runs in the registry: the same text, the code that `watch` and `list` test, and no new directory.
+  const run = await engine.launch({ repository: "example", label: "known" });
+  for (const call of [() => engine.status(unknown), () => engine.collect(unknown), () => engine.cancel(unknown), () => engine.wait(unknown)]) {
+    expect(await call().catch(error => error)).toMatchObject({ message: text, code: "ENOENT" });
+  }
+  expect(await readdir(join(home, "runs"))).toEqual([run.id]);
+  // A report from a run that does not exist: the launch fails with the same sentence, and nothing reaches the executor.
+  await expect(engine.launch({ repository: "example", label: "fuzz", audit_profile: "v2/stateful-fuzzing", properties: unknown })).rejects.toThrow(text);
+  expect(cloud.launches).toBe(1);
+  expect((await readdir(join(home, "runs"))).includes(unknown)).toBe(false);
+  expect(await engine.list()).toHaveLength(2);
+  // `recover` still makes the directory of a run that has no local record.
+  await rm(join(home, "runs", run.id), { recursive: true });
+  expect((await engine.recover(run.id)).map(record => record.id)).toEqual([run.id]);
+  expect((await readRun(home, run.id)).id).toBe(run.id);
+});
+
+test("tracked paths that the source snapshot leaves out are in the record and in one launch line", async () => {
+  const { home, source, engine } = await fixture({ results: false });
+  await mkdir(join(source, "packages/a/.cache"), { recursive: true });
+  await writeFile(join(source, ".npmrc"), "legacy-peer-deps=true\n");
+  await writeFile(join(source, "packages/a/.env"), "RPC_URL=http://localhost:8545\n");
+  await writeFile(join(source, "packages/a/.cache/fixture.json"), "{}\n");
+  await writeFile(join(source, "packages/a/index.js"), "export {};\n");
+  for (const args of [["add", "-f", "."], ["-c", "commit.gpgsign=false", "commit", "-qm", "tracked"]]) expect(await Bun.spawn(["git", ...args], { cwd: source, stdout: "ignore", stderr: "pipe" }).exited).toBe(0);
+  let run!: RunRecord;
+  const lines = await stderrLines(async () => { run = await engine.launch({ repository: "example", label: "tracked" }); });
+  const reason = "tracked path left out of the source snapshot: it has the name of a credential store or a cache";
+  expect(run.omitted).toEqual([".npmrc", "packages/a/.cache", "packages/a/.env"].map(path => ({ path: `source/${path}`, reason })));
+  expect(lines).toEqual([`Run ${run.id}: the source snapshot leaves out 3 tracked paths with the name of a credential store or a cache (.npmrc, packages/a/.cache, packages/a/.env). The run record lists them in omitted.\n`]);
+  // The worker gets the same list in its job, so the result package has it too.
+  expect(JSON.parse(await readFile(join(home, "runs", run.id, "staging/job.json"), "utf8")).record.omitted).toEqual(run.omitted);
+  // A source without such a path gives no line and no entry.
+  await rm(join(source, ".npmrc")); await rm(join(source, "packages"), { recursive: true });
+  for (const args of [["add", "-A", "."], ["-c", "commit.gpgsign=false", "commit", "-qm", "plain"]]) expect(await Bun.spawn(["git", ...args], { cwd: source, stdout: "ignore", stderr: "pipe" }).exited).toBe(0);
+  expect(await stderrLines(async () => { expect((await engine.launch({ repository: "example", label: "plain" })).omitted).toEqual([]); })).toEqual([]);
 });
 
 test("a short value of an environment variable with KEY or TOKEN in its name does not change the package", async () => {

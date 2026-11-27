@@ -53,6 +53,27 @@ test("source snapshot records the default-branch commit, retains build inputs an
   expect(await readlink(join(unpacked, "source-link"))).toBe("src/main.txt");
   expect((await lstat(join(unpacked, "build.sh"))).mode & 0o111).not.toBe(0);
   expect((await readdir(destination)).sort()).toEqual(["source.tar.gz", "workspace"]);
+  // The snapshot is not the whole tree of the commit, so the caller gets each path that was left out. `.git` is not a path of the commit.
+  expect(result.excluded).toEqual([".cache", ".env", ".git-credentials"]);
+});
+
+test("the paths of the commit that the snapshot leaves out are named at every depth", async () => {
+  const root = await directory(), repo = await repository(root);
+  await mkdir(join(repo, "packages/a/.cache"), { recursive: true }); await mkdir(join(repo, "packages/b/node_modules/dep"), { recursive: true });
+  await writeFile(join(repo, ".npmrc"), "legacy-peer-deps=true\n");
+  await writeFile(join(repo, "packages/a/.env"), "RPC_URL=http://localhost:8545\n");
+  await writeFile(join(repo, "packages/a/.cache/fixture.json"), "{}\n");
+  await writeFile(join(repo, "packages/a/index.js"), "export {};\n");
+  await writeFile(join(repo, "packages/b/node_modules/dep/index.js"), "export {};\n");
+  await commit(repo);
+  const result = await prepareSource(repo, undefined, join(root, "prepared"));
+  // One entry for a directory, not one for each file in it.
+  expect(result.excluded).toEqual([".npmrc", "packages/a/.cache", "packages/a/.env", "packages/b/node_modules"]);
+  const names: string[] = [];
+  await listTar({ file: result.archive, onReadEntry: (entry) => { names.push(entry.path); } });
+  expect(names.filter((name) => !name.endsWith("/")).sort()).toEqual(["./packages/a/index.js"]);
+  // A dependency input is a reference, not the audited source. Its checkout has the same rule.
+  expect((await readdir(join((await prepareDependency(repo, undefined, join(root, "dependency"))).checkout, "packages/a"))).sort()).toEqual(["index.js"]);
 });
 
 test("recursive submodules are included and dependency revisions resolve independently", async () => {
@@ -105,7 +126,17 @@ test("escaping, absolute and looping input links and device files are rejected a
     await symlink(target, join(input, "link"));
     await expect(stageInputs([{ name: "input", path: input }], destination)).rejects.toThrow("symlink");
     await rm(join(input, "link"));
+    // The text names the link, so the operator does not have to search the tree.
+    await mkdir(join(input, "deep"), { recursive: true }); await symlink(target === "link" ? "inner" : target.startsWith("/") ? target : join("..", target), join(input, "deep/inner"));
+    await expect(stageInputs([{ name: "input", path: input }], destination)).rejects.toThrow(target.startsWith("/") ? "Input contains an absolute symlink: deep/inner" : "Input symlink deep/inner escapes its tree, loops, or points into excluded metadata");
+    await rm(join(input, "deep"), { recursive: true });
     expect(await readFile(join(destination, "previous"), "utf8")).toBe("retained\n");
+  }
+  // A link of a host input into a credential store or a cache stays refused, also when it has no target.
+  for (const target of ["node_modules/forge-std", ".env", ".git/config"]) {
+    await symlink(target, join(input, "link"));
+    await expect(stageInputs([{ name: "input", path: input }], destination)).rejects.toThrow("Input symlink link escapes its tree, loops, or points into excluded metadata");
+    await rm(join(input, "link"));
   }
   const fifo = Bun.spawn(["mkfifo", join(input, "pipe")], { stdout: "ignore", stderr: "pipe" }); expect(await fifo.exited).toBe(0);
   await expect(stageInputs([{ name: "input", path: input }], destination)).rejects.toThrow("unsupported file");
@@ -114,8 +145,32 @@ test("escaping, absolute and looping input links and device files are rejected a
 test("source links cannot expose the host or Git credential metadata", async () => {
   const root = await directory(), repo = await repository(root);
   await symlink(".git/config", join(repo, "metadata")); await commit(repo);
-  await expect(prepareSource(repo, undefined, join(root, "snapshot"))).rejects.toThrow("excluded metadata");
+  await expect(prepareSource(repo, undefined, join(root, "snapshot"))).rejects.toThrow("Input symlink metadata escapes its tree, loops, or points into excluded metadata");
   await expect(prepareSource("https://user:fixture-token@example.invalid/source.git", undefined, join(root, "url"))).rejects.toThrow("must not contain credentials");
+});
+
+test("a tracked link into a directory that the snapshot leaves out is kept in a clone; a link that leaves the tree is refused by name", async () => {
+  const root = await directory(), repo = await repository(root);
+  // A hybrid Hardhat and Foundry project: the library is a link into node_modules, which `npm install` fills in the worker.
+  await mkdir(join(repo, "lib")); await writeFile(join(repo, "foundry.toml"), "[profile.default]\n");
+  await symlink("../node_modules/forge-std", join(repo, "lib/forge-std"));
+  await writeFile(join(repo, ".env"), "RPC_URL=http://localhost:8545\n"); await symlink(".env", join(repo, "env.local"));
+  await commit(repo);
+  const result = await prepareSource(repo, undefined, join(root, "kept"));
+  const unpacked = join(root, "unpacked"); await mkdir(unpacked); await extractTar({ cwd: unpacked, file: result.archive });
+  expect(await readlink(join(unpacked, "lib/forge-std"))).toBe("../node_modules/forge-std");
+  // The target is not in the snapshot, so the link shows nothing.
+  expect(await readlink(join(unpacked, "env.local"))).toBe(".env");
+  expect((await readdir(unpacked)).sort()).toEqual(["env.local", "foundry.toml", "lib"]);
+  expect(result.excluded).toEqual([".env"]);
+  // The same commit as a dependency input is staged as a host directory, where every such link is refused.
+  await expect(prepareDependency(repo, undefined, join(root, "dependency"))).rejects.toThrow("Input symlink env.local escapes its tree, loops, or points into excluded metadata");
+  // Links that leave the tree, absolute links and links into Git metadata stay refused, and the text names the link.
+  for (const [target, text] of [["../../outside", "Input symlink lib/bad escapes its tree, loops, or points into excluded metadata"], ["/etc/hostname", "Input contains an absolute symlink: lib/bad"], ["../.git/config", "Input symlink lib/bad escapes its tree, loops, or points into excluded metadata"], ["../node_modules/../.git/config", "Input symlink lib/bad escapes its tree, loops, or points into excluded metadata"]] as const) {
+    await symlink(target, join(repo, "lib/bad")); await commit(repo);
+    await expect(prepareSource(repo, undefined, join(root, "refused"))).rejects.toThrow(text);
+    await rm(join(repo, "lib/bad"));
+  }
 });
 
 test("LFS is materialized when needed and missing tooling or unresolved pointers stop launch", async () => {

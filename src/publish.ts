@@ -13,7 +13,8 @@ interface PullRequest { number: number; state: "OPEN" | "CLOSED" | "MERGED"; url
  * changed, so a new attempt with the same package gives the same answer.
  */
 export class ResultsMerged extends Error {
-  constructor(id: string) {
+  /** `pr_url` is the merged pull request. A local record can be without it: a recovered run, or a first publication that failed after the request was made. */
+  constructor(id: string, readonly pr_url?: string) {
     super(`Results for ${id} were already merged; these artifacts differ. Preserve the merged result and publish a new run.`);
     this.name = "ResultsMerged";
   }
@@ -160,7 +161,7 @@ export async function publishRun(record: RunRecord, artifactDir: string, options
       await git(["checkout", "--detach", "--force", "FETCH_HEAD"], checkout);
       const changed = await applyArtifacts(checkout, root, record.id, artifacts);
       if (merged) {
-        if (changed) throw new ResultsMerged(record.id);
+        if (changed) throw new ResultsMerged(record.id, pr.url);
         return { pr_url: pr.url };
       }
       if (changed) {

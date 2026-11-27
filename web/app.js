@@ -68,6 +68,8 @@ function renderRuns() {
     state.append(node("span", displayState.charAt(0).toUpperCase() + displayState.slice(1), `badge ${displayState}`));
     state.append(node("div", run.state === "finished" ? `${run.end || "finished"} · ${age(run.finished_at || run.created_at)}` : `Started ${age(run.started_at || run.created_at)}`, "end-label"));
     if (run.error) state.title = run.error;
+    // The last status check of the dashboard failed, so this row shows the stored record.
+    if (run.refresh_error) { const stale = node("div", "Status check failed", "end-label"); stale.title = run.refresh_error; state.append(stale); }
     cost.className = "align-right cost"; cost.textContent = run.usage.cost_usd == null ? "—" : `$${run.usage.cost_usd.toFixed(2)}`;
     cost.title = run.usage.cost_provenance || "Cost unavailable";
     const actions = node("div", undefined, "actions");
@@ -76,8 +78,10 @@ function renderRuns() {
         const url = new URL(run.publication.pr_url);
         if (url.protocol === "https:") { const link = node("a", "Results ↗", "result-link"); link.href = url.href; link.target = "_blank"; link.rel = "noopener noreferrer"; actions.append(link); }
       } catch { /* A malformed URL must not become a clickable action. */ }
-    } else if (run.state === "finished" && run.publication.state !== "disabled") {
-      // No pull request is normal for a local-only run, so only enabled publication is shown.
+    }
+    // No pull request is normal for a local-only run, so only enabled publication is shown. A run with a pull
+    // request can have a later publication that failed. "published" with an error is a merged result, not a failure.
+    if (run.state === "finished" && (run.publication.state === "failed" || run.publication.state === "pending")) {
       const publication = node("span", run.publication.state === "failed" ? "Publish retry pending" : "Publishing…", "end-label");
       publication.title = run.publication.error || "Results publication is retried during collection."; actions.append(publication);
     }

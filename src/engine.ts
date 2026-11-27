@@ -21,7 +21,7 @@ export const settled = (record: RunRecord) => record.state === "finished" && rec
 export type Publisher = typeof publishRun;
 const absent = (error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; };
 /** Why a status call for a run failed. A busy operation lock is normal during a long collection. */
-const failure = (id: string, error: unknown) => `Run ${id}: ${(error as NodeJS.ErrnoException).code === "ELOCKED" ? "another command is working on this run" : `the status check failed (${message(error)})`}.`;
+export const failure = (id: string, error: unknown) => `Run ${id}: ${(error as NodeJS.ErrnoException).code === "ELOCKED" ? "another command is working on this run" : `the status check failed (${message(error)})`}.`;
 /** A pause that an abort ends early. A timer cannot be longer than 2^31 - 1 ms: a larger value would end at once. */
 const pause = (ms: number, signal?: AbortSignal) => new Promise<void>(resolve => {
   const end = () => { clearTimeout(timer); signal?.removeEventListener("abort", end); resolve(); };
@@ -99,6 +99,8 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
     const source = join(directory(id), "collected"), artifacts = join(directory(id), "artifacts");
     const publish = record.publication.state !== "disabled";
     let collected = record.collection.state === "collected" && await exists(join(artifacts, "run.yml"));
+    // An intact earlier package. A forced collection that fails must not take it from the record.
+    const packaged = collected;
     if (!force && collected && (!publish || record.publication.state === "published")) return record;
     if (force || !collected) {
       collected = false;
@@ -112,14 +114,17 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
         }
         record.status = await nonempty(join(source, "raw/report.md")) ? "succeeded" : "failed";
         record.omitted = [...record.omitted.filter(item => !omitted.some(next => next.path === item.path)), ...omitted];
-        if (omitted.some(item => /(^|\/)(report\.md|transcript[^/]*)(\.gz)?$/.test(item.path))) throw new Error("A mandatory artifact could not be collected. Original outputs remain in the run store.");
+        // The worker writes the transcript as a regular file. A report that is not a regular file is a missing report: the entry stays in `omitted`.
+        if (omitted.some(item => /^raw\/transcript\.jsonl(\.gz)?$/.test(item.path))) throw new Error("A mandatory artifact could not be collected. Original outputs remain in the run store.");
         const prepared = await prepareArtifacts(source, artifacts, record, knownSecrets());
         record.omitted = prepared.omitted;
         const report = join(artifacts, "raw/report.md");
         record.collection = { state: "collected", path: artifacts, report: await nonempty(report) ? report : null };
         collected = true;
       } catch (error) {
-        // An earlier package stays intact when a new collection fails, so its paths stay valid.
+        // An earlier package stays intact when a new collection fails. The record is not written, so the run stays as
+        // it was: a store that was deleted after the collection would otherwise make the run fail for good.
+        if (force && packaged) throw new Error(`Run ${id}: the forced collection failed (${message(error)}). The earlier package is kept, and the record is not changed.`);
         record.collection = { ...record.collection, state: "failed", error: message(error) };
       }
     }
@@ -130,12 +135,13 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
         record.publication = { ...record.publication, state: "published", pr_url: published.pr_url };
         delete record.publication.error;
       } catch (error) {
-        const url = record.publication.pr_url;
+        // A record can be without the URL: a recovered run, or a first publication that failed after the pull request was made. The publisher then gives it.
+        const url = record.publication.pr_url ?? (error instanceof ResultsMerged ? error.pr_url ?? null : null);
         if (error instanceof ResultsMerged && url) {
           // The run has its pull request, and that request was merged. This package is a new one, from a completion
           // record that showed late or from a forced collection, and it differs from the merged files. Merged results
           // are never changed, so no new attempt can work. The publication stays closed, and the run can settle.
-          record.publication = { ...record.publication, state: "published", error: message(error) };
+          record.publication = { ...record.publication, state: "published", pr_url: url, error: message(error) };
           process.stderr.write(`Run ${id}: the pull request of this run was merged (${url}), and the new package differs from the merged files. The merged files stay as they are. The new package is on this machine only: ${artifacts}\n`);
         } else record.publication = { ...record.publication, state: "failed", error: message(error) };
       }
@@ -193,8 +199,8 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
         profile: record.profile, harness: { ...record.harness, version: observed.complete.harness.version },
         executor: { ...record.executor, runtime_id: observed.runtime_id ?? record.executor.runtime_id }, publication: record.publication,
       };
+      // The worker sets the end "cancelled" itself when a stop request reached it. A request that came after the worker ended changes nothing.
       record.state = "finished";
-      if (cancelled) record.end = "cancelled";
       if (ended) process.stderr.write(`Run ${id}: the completion record is there now. The run is collected again.\n`);
     } else if (observed.code === null) {
       if (ended) {
@@ -239,8 +245,8 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
       // A launch wrote its result during the observation. That result is newer than the observation, so only the time is recorded.
       stale = current.state !== read.state || current.executor.runtime_id !== read.runtime_id || current.error !== read.error;
       if (stale) return { ...current, last_observed_at: record.last_observed_at };
-      // A cancellation can arrive during network observation; do not overwrite it.
-      if (current.end === "cancelled") record.end = "cancelled";
+      // A cancellation can arrive during network observation; do not overwrite it. With a completion record, the worker has the last word.
+      if (current.end === "cancelled" && !observed.complete) record.end = "cancelled";
       return record;
     });
     if (stale) return stored;
@@ -262,22 +268,36 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
     }),
     /**
      * Poll until the run ended and was collected. One failed poll does not end a wait of many hours: the network can
-     * fail for a short time, and another command can hold the run's operation lock. `interval` and `patience` are
-     * milliseconds; the wait gives up when every poll failed for `patience`.
+     * fail for a short time, and another command can hold the run's operation lock. `interval`, `patience` and `busy`
+     * are milliseconds. The wait gives up when every poll failed for `patience`. A busy lock shows that a live command
+     * works on the run, and a long collection holds it for longer than `patience`. So polls that find the lock busy
+     * do not count toward `patience`: the wait gives up only when every poll failed for `busy`.
      */
-    async wait(id: string, { interval = 5000, patience = 10 * 60_000 } = {}): Promise<RunRecord> {
+    async wait(id: string, { interval = 5000, patience = 10 * 60_000, busy = 2 * 3_600_000 } = {}): Promise<RunRecord> {
       await readRun(home, id); // An unknown run fails at once.
-      let failingSince: number | null = null;
+      // The first poll of the current row of failed polls, and of the current row of polls that failed for another reason than the lock.
+      let failingSince: number | null = null, brokenSince: number | null = null, brokenLine = false, busyLineAt = 0;
+      const minutes = (ms: number) => Math.round(ms / 60_000);
       for (;;) {
         try {
           const record = await engine.status(id);
           if (record.state === "finished") return record;
-          failingSince = null;
+          failingSince = brokenSince = null; brokenLine = false; busyLineAt = 0;
         } catch (error) {
-          if (failingSince === null) {
-            failingSince = Date.now();
-            process.stderr.write(`${failure(id, error)} Still waiting; this command tries again for up to ${Math.round(patience / 60_000)} minutes.\n`);
-          } else if (Date.now() - failingSince >= patience) throw error;
+          const time = Date.now(), locked = (error as NodeJS.ErrnoException).code === "ELOCKED";
+          failingSince ??= time;
+          brokenSince = locked ? null : brokenSince ?? time;
+          // The last line names the run and the cause.
+          if (time - failingSince >= busy || (brokenSince !== null && time - brokenSince >= patience)) throw new Error(failure(id, error));
+          if (locked && time - busyLineAt >= 10 * 60_000) {
+            // One line for the first busy poll, and one more each ten minutes while the lock stays busy.
+            busyLineAt = time;
+            process.stderr.write(`${failure(id, error)} Still waiting; this command tries again for up to ${minutes(busy)} minutes.\n`);
+          } else if (!locked && !brokenLine) {
+            // One line for a row of failures, not one for each poll.
+            brokenLine = true;
+            process.stderr.write(`${failure(id, error)} Still waiting; this command tries again for up to ${minutes(patience)} minutes.\n`);
+          }
         }
         await Bun.sleep(interval);
       }
@@ -312,7 +332,7 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
       };
       /**
        * Read the record of a row again. A record that is gone or damaged ends the work on the row: `status` cannot
-       * repair it, and would create the run directory again. Another command can also change a run that the watch
+       * repair it. Another command can also change a run that the watch
        * holds as done: a slow launch revives a run that a poll ended as lost, and `collect` completes a run that the
        * watch gave up. A read error is left to the status call, which reports it.
        */
@@ -414,7 +434,7 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
           // Existing local collection and publication state is more current than the worker's record.
           if (!existing) await writeRun(home, record);
           records.push(existing ?? record);
-        });
+        }, true);
       }
       return records;
     },
@@ -466,6 +486,13 @@ export async function createEngine(home: string, executors: ExecutorSource = loa
         await platform.prepare?.(record);
         const source = await prepareSource(repository.url, repository.scope, join(directory(id), "source"), options.revision ?? repository.revision);
         record.source.commit = source.commit;
+        if (source.excluded.length) {
+          // The snapshot is not the whole tree of the commit. A build that needs one of these files can fail, so the record and one line say what is absent.
+          const reason = "tracked path left out of the source snapshot: it has the name of a credential store or a cache";
+          record.omitted.push(...source.excluded.slice(0, 50).map(path => ({ path: `source/${path}`, reason })));
+          if (source.excluded.length > 50) record.omitted.push({ path: "source", reason: `${source.excluded.length - 50} more tracked paths were left out of the source snapshot and are not listed` });
+          process.stderr.write(`Run ${id}: the source snapshot leaves out ${source.excluded.length} tracked ${source.excluded.length === 1 ? "path" : "paths"} with the name of a credential store or a cache (${source.excluded.slice(0, 5).join(", ")}${source.excluded.length > 5 ? ", ..." : ""}). The run record lists them in omitted.\n`);
+        }
         await cp(source.archive, join(stage, "source.tar.gz"));
         record.profile.sha256 = await stageProfile(profile, join(stage, "profile"));
         const inputs: Array<{ name: string; path: string; source_run?: string }> = [];

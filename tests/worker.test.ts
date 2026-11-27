@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync, existsSync, chmodSync, lstatSync, statSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync, existsSync, chmodSync, lstatSync, statSync, symlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { c as createTar } from "tar";
@@ -102,7 +103,84 @@ describe("worker execution contract", () => {
     const record = await runWorker(root);
     expect(record.status).toBe("failed"); expect(record.continuation?.report_after).toBe(false);
     expect(readFileSync(join(job.output_dir, "raw/transcript.jsonl"), "utf8").split("ses_test").length - 1).toBe(2);
+    // The one continuation message says what counts as a report: an agent that makes report.md as a link has no report.
+    expect(readFileSync(join(job.output_dir, "raw/continuation.txt"), "utf8")).toEndWith("write report.md before time runs out. report.md must be a regular file with the report text, not a link to another file.");
   });
+  test("a stop request during the session export is honoured: the rest is skipped and the completion record is written in time", async () => {
+    // Each `opencode export` takes half a second, and the run has 20 sessions. The first export marks the start.
+    const { root, job } = await stubRun(`if [ "$1" = "export" ]; then touch 'EXPORTING'; sleep 0.5; echo "{\\"id\\":\\"$2\\"}"; exit 0; fi\necho '# Report' > 'REPORT'`);
+    const script = join(root, "bin/opencode"), exporting = join(root, "exporting");
+    writeFileSync(script, readFileSync(script, "utf8").replace("EXPORTING", exporting).replace("REPORT", join(job.output_dir, "raw/report.md")));
+    fakeSync(root);
+    const data = join(root, "state/home/.local/share/opencode"); mkdirSync(data, { recursive: true });
+    const database = new Database(join(data, "opencode.db"));
+    database.exec("CREATE TABLE session (id TEXT); CREATE TABLE part (data TEXT)");
+    for (let index = 0; index < 20; index++) database.query("INSERT INTO session (id) VALUES (?)").run(`ses_${String(index).padStart(2, "0")}`);
+    database.close();
+    const exits: number[] = [];
+    let stoppedAt = 0;
+    const poll = setInterval(() => { if (existsSync(exporting)) { clearInterval(poll); stoppedAt = Date.now(); process.emit("SIGTERM"); } }, 10);
+    // The grace period is 6 seconds, so the export must stop 3 seconds after the request. All 20 exports need 10 seconds.
+    const record = await runWorker(root, { grace: 6000, exit: (code) => { exits.push(code); } });
+    clearInterval(poll);
+    expect(stoppedAt).toBeGreaterThan(0);
+    // The worker did not need its last resort, and its record was there before the grace period ended.
+    expect(exits).toEqual([]);
+    expect(Date.now() - stoppedAt).toBeLessThan(6000);
+    expect(JSON.parse(readFileSync(join(root, "complete.json"), "utf8"))).toEqual(record);
+    expect(record).toMatchObject({ state: "finished", status: "succeeded", end: "cancelled", session_id: "ses_test" });
+    // The sessions that were not exported are listed, one entry for each.
+    const exported = readdirSync(join(job.output_dir, "raw/sessions")), skipped = record.omitted.filter((item) => item.reason === "Session export unavailable; native database retained in the run store" || item.reason === "Session export failed; native database retained in the run store");
+    expect(exported.length).toBeGreaterThan(0);
+    expect(exported.length).toBeLessThan(12);
+    expect(exported.length + skipped.length).toBe(20);
+    expect(skipped.map((item) => item.path)).toContain("raw/sessions/ses_19.json");
+  }, 20_000);
+  test("a stop request reaches the worker during the workspace export, which is synchronous", async () => {
+    // The harness leaves 400 new files. The first copied file marks the start of the export.
+    const { root, job } = await stubRun(`for i in $(seq 1 400); do echo new > "file-$i.sol"; done; echo '# Report' > 'REPORT'`);
+    const script = join(root, "bin/opencode"), copied = join(job.output_dir, "raw/workspace");
+    writeFileSync(script, readFileSync(script, "utf8").replace("REPORT", join(job.output_dir, "raw/report.md")));
+    fakeSync(root);
+    // A check at each turn of the event loop. It can only run when the export gives way.
+    let stopped = false, turn: ReturnType<typeof setImmediate>;
+    const watch = () => { if (existsSync(copied)) { stopped = true; process.emit("SIGTERM"); } else turn = setImmediate(watch); };
+    watch();
+    const record = await runWorker(root, { grace: 2, breath: 0, exit: () => {} });
+    clearImmediate(turn!);
+    expect(stopped).toBe(true);
+    expect(record).toMatchObject({ state: "finished", status: "succeeded", end: "cancelled" });
+    expect(record.omitted).toContainEqual({ path: "raw/workspace", reason: "Export stopped at the time limit; the workspace stays in the run store" });
+    expect(readdirSync(copied).length).toBeLessThan(400);
+    expect(JSON.parse(readFileSync(join(root, "complete.json"), "utf8"))).toEqual(record);
+    // The marker of a stop request is seen as well, for a worker that the signal did not reach.
+    const marked = await stubRun(`for i in $(seq 1 400); do echo new > "file-$i.sol"; done; echo '# Report' > 'REPORT'`);
+    writeFileSync(join(marked.root, "bin/opencode"), readFileSync(join(marked.root, "bin/opencode"), "utf8").replace("REPORT", join(marked.job.output_dir, "raw/report.md")));
+    fakeSync(marked.root);
+    const mark = () => { if (existsSync(join(marked.job.output_dir, "raw/workspace"))) writeFileSync(join(marked.root, "cancelled"), ""); else turn = setImmediate(mark); };
+    mark();
+    const later = await runWorker(marked.root, { grace: 2, breath: 0, exit: () => {} });
+    clearImmediate(turn!);
+    expect(later.end).toBe("cancelled");
+    expect(later.omitted).toContainEqual({ path: "raw/workspace", reason: "Export stopped at the time limit; the workspace stays in the run store" });
+    expect(readdirSync(join(marked.job.output_dir, "raw/workspace")).length).toBeLessThan(400);
+  }, 20_000);
+  test("the logs keep characters outside the Basic Multilingual Plane whole", async () => {
+    // The sink keeps a window of the length of the key minus one. A cut between the two halves of one character
+    // would write each half as U+FFFD. The chunks differ in length by one, so both positions of the cut are covered.
+    const rockets = "\u{1F680}".repeat(100), chunks = ["", "a", "ab", "abc"].map((prefix) => `${prefix}${rockets}`);
+    const { root, job } = await stubRun(`${chunks.map((chunk) => `printf '%s\\n' '${chunk}'; printf '%s\\n' '${chunk}' >&2; sleep 0.15`).join("\n")}\necho '# Report' > 'REPORT'`);
+    const script = join(root, "bin/opencode"); writeFileSync(script, readFileSync(script, "utf8").replace("REPORT", join(job.output_dir, "raw/report.md")));
+    fakeSync(root);
+    expect(process.env.OPENROUTER_API_KEY).toHaveLength(25);
+    const record = await runWorker(root);
+    expect(record.status).toBe("succeeded");
+    const transcript = readFileSync(join(job.output_dir, "raw/transcript.jsonl"), "utf8"), errors = readFileSync(join(job.output_dir, "raw/stderr.log"), "utf8");
+    expect(transcript).not.toContain("\uFFFD");
+    expect(transcript).toBe(`{"type":"text","sessionID":"ses_test"}\n${chunks.map((chunk) => `${chunk}\n`).join("")}`);
+    expect(errors).toBe(chunks.map((chunk) => `${chunk}\n`).join(""));
+    expect(record.redactions ?? 0).toBe(0);
+  }, 20_000);
   test("cancellation preserves evidence and skips continuation", async () => {
     const { root, job } = await stubRun("sleep 20");
     const cancel = setTimeout(() => process.emit("SIGTERM"), 50);
@@ -342,6 +420,11 @@ describe("worker execution contract", () => {
   test("whitespace reports are incomplete", () => {
     const { root } = jobFixture(); const report = join(root, "report.md"); writeFileSync(report, " \n\t");
     expect(nonemptyReport(report)).toBe(false);
+    // A link is never followed, so a link to a report is not a report. The collectors leave links out too.
+    writeFileSync(join(root, "real.md"), "# Report\n");
+    rmSync(report); symlinkSync("real.md", report);
+    expect(nonemptyReport(report)).toBe(false);
+    expect(nonemptyReport(join(root, "real.md"))).toBe(true);
   });
   test("OpenCode accounting includes cache and reasoning components", () => {
     const usage = usageFromEvents("opencode", [{ type: "step_finish", part: { id: "step", cost: 0.1, tokens: { input: 10, output: 20, reasoning: 30, cache: { read: 40, write: 50 } } } }]);

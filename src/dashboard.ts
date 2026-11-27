@@ -1,5 +1,5 @@
 import { join, resolve } from "node:path";
-import { WATCH_ATTEMPTS, createEngine, settled, type Publisher } from "./engine";
+import { WATCH_ATTEMPTS, createEngine, failure, settled, type Publisher } from "./engine";
 import { loadConfig } from "./config";
 import type { ExecutorSource } from "./executor";
 import { listProfiles } from "./profiles";
@@ -20,12 +20,20 @@ const json = (body: unknown, status = 200) => Response.json(body, { status, head
 /** The pause before the second automatic attempt of a failed collection or publication, in milliseconds. Each later pause is twice as long, as in `watch`. */
 const RETRY = 2 * 60_000;
 
-/** Returns a function that stops the server. `executors` and `publisher` replace the real ones in tests. */
-export async function serveDashboard(home: string, port = 3000, executors?: ExecutorSource, publisher?: Publisher): Promise<() => void> {
+/** A run in the list of the page. `refresh_error` says why its last status check failed. It is in the response only, never in the record. */
+type Listed = RunRecord & { refresh_error?: string };
+
+/**
+ * Returns a function that stops the server. `executors` and `publisher` replace the real ones in tests.
+ * `patience` is the longest time in milliseconds that the run list waits for a refresh before it answers with the stored records.
+ */
+export async function serveDashboard(home: string, port = 3000, executors?: ExecutorSource, publisher?: Publisher, patience = 2000): Promise<() => void> {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Dashboard port must be between 1 and 65535.");
   const engine = await createEngine(home, executors, publisher);
   // Avoid overlapping collectors when multiple browser tabs poll at once.
-  let refresh: Promise<RunRecord[]> | undefined;
+  let refresh: Promise<Listed[]> | undefined;
+  // The runs whose last status check failed. One line on standard error for each row of failures, as in `watch`.
+  const unchecked = new Set<string>();
   // The list is refreshed every few seconds. A collection or a publication that failed is not tried again at each
   // refresh: the attempts move apart (2, 4, 8 and 16 minutes) and end after five failures in a row, as in `watch`.
   // The counts live in this process. `collect`, `status` and the page of one run still try at once.
@@ -48,11 +56,19 @@ export async function serveDashboard(home: string, port = 3000, executors?: Exec
   };
   const runs = () => refresh ??= (async () => {
     const records = await engine.list();
-    const updates: RunRecord[] = [];
+    const updates: Listed[] = [];
     for (let index = 0; index < records.length; index += 4) {
       const batch = records.slice(index, index + 4);
       const observed = await Promise.allSettled(batch.map(refreshed));
-      updates.push(...observed.map((result, offset) => result.status === "fulfilled" ? result.value : batch[offset]!));
+      updates.push(...observed.map((result, offset): Listed => {
+        const stale = batch[offset]!;
+        if (result.status === "fulfilled") { unchecked.delete(stale.id); return result.value; }
+        // The stored record is shown. A busy lock is normal while another command collects the run, so it is no failure.
+        if ((result.reason as NodeJS.ErrnoException)?.code === "ELOCKED") return stale;
+        const text = failure(stale.id, result.reason);
+        if (!unchecked.has(stale.id)) { unchecked.add(stale.id); process.stderr.write(`${text} The dashboard shows the stored record and tries again at each refresh.\n`); }
+        return { ...stale, refresh_error: text };
+      }));
     }
     return updates;
   })().finally(() => { refresh = undefined; });
@@ -77,7 +93,15 @@ export async function serveDashboard(home: string, port = 3000, executors?: Exec
           const config = await loadConfig(home);
           return json({ defaults: config.defaults, repositories: config.repositories, profiles: await listProfiles() });
         }
-        if (url.pathname === "/api/runs" && request.method === "GET") return json({ runs: await runs() });
+        if (url.pathname === "/api/runs" && request.method === "GET") {
+          // A refresh collects and publishes, and that can take minutes. The page must not wait for it: after a short
+          // time the answer is the stored records, and the one shared refresh continues.
+          const fresh = runs();
+          fresh.catch(() => undefined); // The collector timer reports a failed refresh.
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const stored = new Promise<Listed[]>((resolve, reject) => { timer = setTimeout(() => engine.list().then(resolve, reject), patience); });
+          return json({ runs: await Promise.race([fresh, stored]).finally(() => clearTimeout(timer)) });
+        }
         if (url.pathname === "/api/runs" && request.method === "POST") {
           const body = await request.json() as LaunchOptions;
           // The form reloads config on page load, so launches must use that config too.
@@ -100,7 +124,9 @@ export async function serveDashboard(home: string, port = 3000, executors?: Exec
         }
         return json({ error: "Not found." }, 404);
       } catch (error) {
-        return json({ error: error instanceof Error ? error.message : String(error) }, 400);
+        // A run that the registry does not have is "not found", not a bad request.
+        const unknown = url.pathname.startsWith("/api/runs/") && (error as NodeJS.ErrnoException)?.code === "ENOENT";
+        return json({ error: error instanceof Error ? error.message : String(error) }, unknown ? 404 : 400);
       }
     },
   });
