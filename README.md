@@ -1,6 +1,6 @@
 # Ultrafuzz v0.2 (experimental)
 
-> **Experimental release (`0.2.0-experimental`).** One real audit has completed on this runner: the profile `v2/pareto` with OpenCode on the Modal executor. No real audit has completed on Docker, with Claude Code or Codex, or with the other two profiles. No test calls a model. The offline tests use fakes, and the two live tests (one on a real Docker Engine, one on a real Modal account) use a stub harness. Expect failures, and expect the interface to change.
+> **Experimental release (`0.2.0-experimental`).** Three real audits have completed on this runner: the profile `v2/pareto` with OpenCode on the Modal executor, on a Foundry project, a Hardhat project and a Vyper project. No real audit has completed on Docker, with Claude Code or Codex, or with the other two profiles. No test calls a model. The offline tests use fakes, and the two live tests (one on a real Docker Engine, one on a real Modal account) use a stub harness. Expect failures, and expect the interface to change.
 
 Ultrafuzz starts one security audit from one prompt and brings the agent's `report.md` back to your machine. A profile supplies the prompt and its skills. The agent harness (Claude Code, OpenCode or Codex) controls the audit and any subagents. The runner does the rest: launch, timeouts, one continuation when the report is missing, collection, and optional publication to GitHub.
 
@@ -20,7 +20,7 @@ In the code, with tests that call no model:
 
 Not done:
 
-- Only one real audit has completed: `v2/pareto` with OpenCode on Modal. No real audit has completed on Docker, with Claude Code or Codex, or with the other two profiles.
+- Real audits have completed only with `v2/pareto`, OpenCode and Modal (three runs). No real audit has completed on Docker, with Claude Code or Codex, or with the other two profiles.
 - No real run has reached its time limit. The collection of such a run is not tested.
 - No publication to a real GitHub repository.
 - Treat the Docker executor as untested on a commit until the `docker` job of the Check workflow passes for that commit.
@@ -213,7 +213,7 @@ The run records the package version, the profile name and a digest of the instal
 
 ### Pareto v2 (work in progress)
 
-`v2/pareto` is set up for OpenCode only, with the model `deepseek/deepseek-v4.1-flash-1017`. **One live run of this profile has completed on this runner, on Modal with `cpu = 8`. Expect failures.**
+`v2/pareto` is set up for OpenCode only, with the model `deepseek/deepseek-v4.1-flash-1017`. **Three live runs of this profile have completed on this runner, on Modal with `cpu = 8`: one on a Foundry project, one on a Hardhat project and one on a Vyper project. Expect failures.**
 
 The profile contains the Pareto v2 workflow from [Can open-weight models achieve frontier security performance?](https://www.monad.xyz/blog/can-open-weight-models-achieve-frontier-security-performance):
 
@@ -331,7 +331,7 @@ A custom image must provide `sh`, `mkdir`, `cp`, `touch`, `sync`, a GNU-style `t
 
 Select Modal with `executor = "modal"` under `[defaults]`, or with `--executor modal` for one run. The host needs Modal credentials and a `[modal]` table. It needs no Docker.
 
-**What is tested.** The live test with a stub harness (`bun run test:modal`, see [Development and tests](#development-and-tests)) passes on a real Modal account. One real audit (`v2/pareto` with OpenCode) has completed on Modal, and `ultrafuzz watch` collected its report. That run used a worker from an earlier commit of this release.
+**What is tested.** The live test with a stub harness (`bun run test:modal`, see [Development and tests](#development-and-tests)) passes on a real Modal account. Three real audits (`v2/pareto` with OpenCode) have completed on Modal, and `ultrafuzz watch` collected each report. Those runs used a worker from an earlier commit of this release.
 
 **Credentials.** Ultrafuzz uses the Modal client library. The library reads `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` from the environment. Without them it reads the profile file `~/.modal.toml`, which `modal token new` of the Modal command line writes. `MODAL_ENVIRONMENT` selects the Modal environment. `environment` in the `[modal]` table, when set, is used instead of it. A launch checks for credentials before it builds the image and before it clones the source. The credentials stay on the host.
 

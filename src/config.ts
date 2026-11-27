@@ -6,7 +6,7 @@ import { bundledProfilesDirectory } from "./profiles";
 import { EXECUTORS, HARNESSES, VERSION, type Config, type ExecutorName, type ExecutorResources, type Harness, type RepositoryConfig } from "./types";
 
 const template = `# Ultrafuzz ${VERSION} — global configuration
-# Experimental release: only one live audit run has completed on this runner (v2/pareto, OpenCode, Modal).
+# Experimental release: live audit runs have completed only with v2/pareto, OpenCode and Modal.
 # Credentials remain in environment variables, never in this file.
 
 [defaults]
