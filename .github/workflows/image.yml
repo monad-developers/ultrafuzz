@@ -1,0 +1,90 @@
+name: Worker image
+# Builds the real worker image with a plain `docker build` and checks each pinned tool in it.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - .github/workflows/image.yml
+permissions:
+  contents: read
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      # The Dockerfile copies dist/worker.js and plugins/ from the build context.
+      - run: bun run build
+      - run: docker build --tag ultrafuzz-worker:ci .
+      # Most tools are started. The Traverse tools, roundme, recon, recon-generate, jq, rg and git-lfs are only checked for their file.
+      - name: Start or find each pinned tool
+        run: |
+          docker run --rm --entrypoint sh ultrafuzz-worker:ci -ec '
+            set -x
+            node --version
+            bun --version
+            opencode --version
+            claude --version
+            codex --version
+            forge --version
+            cast --version
+            anvil --version
+            chisel --version
+            medusa --version
+            echidna --version
+            slither --version
+            crytic-compile --version
+            solc-select --help >/dev/null
+            scribble --version
+            covg-eval --help >/dev/null
+            git --version
+            python3 --version
+            ls /usr/include/python3.*/Python.h
+            uv --version
+            uvx --version
+            vyper --version
+            # Each installed Vyper compiler compiles a contract that requires its own version.
+            for directory in /opt/vyper/*; do
+              version="$(basename "$directory")"
+              printf "# @version %s\ncounter: public(uint256)\n" "$version" > "/tmp/Counter-$version.vy"
+              "vyper-$version" -f bytecode "/tmp/Counter-$version.vy" | grep "^0x"
+              test "$(PATH="$directory:$PATH" vyper --version | cut -d+ -f1)" = "$version"
+            done
+            timeout --version
+            for tool in sol2cg sol2test sol2bnd sol-storage-analyzer storage-trace roundme; do test -x "/usr/local/bin/$tool"; done
+            # These tools have no other check in this step. Each must be on PATH.
+            # "recon" is only checked for its file: the release binary needs glibc 2.39 and does not start on Debian 12.
+            for tool in recon recon-generate solc jq rg git-lfs; do command -v "$tool"; done
+            test -f /opt/ultrafuzz/worker.js
+            test -d /opt/ultrafuzz/plugins
+            id ultrafuzz
+          '
+      # The harness runs as this user, without root. It must compile Vyper, build a Python environment and select a Solidity compiler.
+      - name: Use the compilers and the Python tools as the unprivileged user
+        run: |
+          docker run --rm --user 10001:10001 --env HOME=/tmp/home --workdir /tmp --entrypoint sh ultrafuzz-worker:ci -ec '
+            set -x
+            mkdir -p /tmp/home /tmp/project/src
+            cd /tmp/project
+            echo "counter: public(uint256)" > src/Counter.vy
+            for directory in /opt/vyper/*; do
+              PATH="$directory:$PATH" vyper -f bytecode src/Counter.vy | grep "^0x"
+              PATH="$directory:$PATH" forge build --force
+            done
+            # crytic-compile reads the output of Vyper 0.3 only. Slither, Echidna and Medusa compile with it.
+            PATH="$(ls -d /opt/vyper/0.3.* | head -n 1):$PATH" crytic-compile src/Counter.vy
+            # pyethash has no wheel. Its C extension needs the C compiler and the Python headers.
+            uv venv --seed venv
+            uv pip install --python venv/bin/python vyper==0.3.9 pyethash==0.1.27
+            venv/bin/python -c "import pyethash, vyper; print(vyper.__version__)"
+            venv/bin/vyper -f bytecode src/Counter.vy | grep "^0x"
+            # solc-select puts a compiler into the home directory. "solc" on PATH then runs that version.
+            solc-select use 0.8.30 --always-install
+            solc --version | grep -F "0.8.30+commit"
+          '

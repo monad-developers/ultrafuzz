@@ -1,0 +1,19 @@
+Perform a security review of {{PROJECT}}, repository {{REPOSITORY}} at commit {{REVISION}}.
+
+You MUST review this repository and revision only. Do not review another copy of the project: other copies can contain different code. If you cannot access the specified revision, stop and say so instead of reviewing something else.
+
+Scope (paths in that repository):
+{{AUDIT_SCOPE}}
+
+Threat model:
+{{THREAT_MODEL}}
+
+Report every vulnerability and bug you find in the in-scope files, with its severity, location, root cause, impact and, where possible, a proof of concept. Write the report to report.md. Install required dependencies and tools for your security review.
+
+Severity. Rate each finding's impact and likelihood as Low, Medium or High and derive its severity from them: Low impact is Low at every likelihood; Medium impact is Low at Low likelihood and Medium otherwise; High impact is Medium at Low likelihood and High otherwise. Impact: High requires direct asset loss or compromise; Medium materially affects protocol operation, availability, accounting or value; Low covers limited defects with minor consequences. Likelihood: High means reliably reachable by an ordinary participant or naturally occurring in realistic use; Medium requires meaningful but plausible conditions; Low requires restrictive conditions or trusted participation. State the actors, permissions and conditions each finding needs. Use Informational for an observation without a demonstrated security consequence.
+
+Your assigned focus (other reviewers cover the rest; report anything else you notice too): {{ASSIGNMENT}}
+
+{{REFERENCE_POLICY}} Workflow. (1) Read the repository README, NatSpec and code comments relevant to the in-scope files and write down what each external or public function promises its callers and users. (2) For each external or public entry point, trace the full call path through helpers, libraries and other in-scope contracts, and check every state change, stored value and token transfer against those promises and against every other entry point that reads or writes the same storage. (3) Build the project with {{BUILD_COMMAND}} and, for each candidate finding, try to confirm it with a Foundry test in your own uniquely named directory; if you cannot finish a test, still report the finding with your reasoning and mark it unconfirmed. If you build into your own cache or out directory, delete that directory when you finish, and keep your tests. (4) Append each finding to your report file as soon as you have it instead of waiting until the end, so nothing is lost if you are cut off. Report every finding you believe may be real at any severity, including ones you are unsure about (state your confidence), each with file:line, root cause, impact and trigger steps. (5) Coverage pass: when you think you are done, list every external or public function and every storage variable (including every storage layout documented in the repository README) in your assigned files, and mark which ones you actually examined. Then do a second pass over everything you did not examine or examined only briefly, this time starting from the storage side: for each storage variable, find every function that writes it and every function that reads it, and check that every writer keeps it consistent with what every reader expects. Add new findings to your report as you go.
+
+Execution instructions: Work from {{WORKSPACE}}. Do not delegate or read other reviewers' reports. Write your individual report to {{REPORT}} instead of the shared report.md, update it as the review progresses, and use a uniquely named directory for any PoC files. Before you return, run {{REPORT_CHECK_COMMAND}} and fix it if the check fails. Return the full report text to the lead as well. If your prior attempt failed, start a fresh review and replace the incomplete report.

@@ -1,0 +1,7 @@
+{
+  "name": "v2/pareto",
+  "description": "Pareto v2: independent hunters, loss-preserving merges, verification and appeals. Made for Solidity/Foundry projects. Work in progress: three live runs have completed on this runner, on Modal with OpenCode (a Foundry, a Hardhat and a Vyper project).",
+  "harnesses": ["opencode"],
+  "available": true,
+  "requires_properties": false
+}

@@ -1,9 +1,0 @@
-{
-  "extends": "./tsconfig.json",
-  "compilerOptions": {
-    "rootDir": ".",
-    "outDir": "dist-test",
-    "types": ["node"]
-  },
-  "include": ["src/**/*.ts", "frontend/.generated/**/*.ts", "frontend/src/wireContracts.ts", "test/**/*.test.ts"]
-}

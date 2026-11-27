@@ -1,0 +1,149 @@
+import { join, resolve } from "node:path";
+import { WATCH_ATTEMPTS, createEngine, failure, settled, type Publisher } from "./engine";
+import { loadConfig } from "./config";
+import type { ExecutorSource } from "./executor";
+import { listProfiles } from "./profiles";
+import { validateRunId } from "./store";
+import type { LaunchOptions, RunRecord } from "./types";
+
+const webRoot = resolve(import.meta.dir, "../web");
+const assets: Record<string, string> = {
+  "/": "index.html", "/app.js": "app.js", "/style.css": "style.css", "/ultrafuzz-logo.svg": "ultrafuzz-logo.svg",
+};
+const headers = {
+  "Cache-Control": "no-store",
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "no-referrer",
+  "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+};
+const json = (body: unknown, status = 200) => Response.json(body, { status, headers });
+/** The pause before the second automatic attempt of a failed collection or publication, in milliseconds. Each later pause is twice as long, as in `watch`. */
+const RETRY = 2 * 60_000;
+
+/** A run in the list of the page. `refresh_error` says why its last status check failed. It is in the response only, never in the record. */
+type Listed = RunRecord & { refresh_error?: string };
+
+/**
+ * Returns a function that stops the server. `executors` and `publisher` replace the real ones in tests.
+ * `patience` is the longest time in milliseconds that the run list waits for a refresh before it answers with the stored records.
+ */
+export async function serveDashboard(home: string, port = 3000, executors?: ExecutorSource, publisher?: Publisher, patience = 2000): Promise<() => void> {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Dashboard port must be between 1 and 65535.");
+  const engine = await createEngine(home, executors, publisher);
+  // Avoid overlapping collectors when multiple browser tabs poll at once.
+  let refresh: Promise<Listed[]> | undefined;
+  // The runs whose last status check failed, each with the text of the failure. One line on standard error for each row of failures, as in `watch`.
+  const unchecked = new Map<string, string>();
+  /** The record as the page gets it: with the mark of a failed status check, if the run has one. */
+  const marked = (record: RunRecord): Listed => unchecked.has(record.id) ? { ...record, refresh_error: unchecked.get(record.id)! } : record;
+  // The list is refreshed every few seconds. A collection or a publication that failed is not tried again at each
+  // refresh: the attempts move apart (2, 4, 8 and 16 minutes) and end after five failures in a row, as in `watch`.
+  // The counts live in this process. `collect`, `status` and the page of one run still try at once.
+  const failing = new Map<string, { step: string; failures: number; retryAt: number }>();
+  const step = (record: RunRecord) => `${record.collection.state}/${record.publication.state}`;
+  const refreshed = async (record: RunRecord): Promise<RunRecord> => {
+    if (settled(record)) { failing.delete(record.id); return record; }
+    const held = failing.get(record.id);
+    // Another command changed the run: the count starts again.
+    if (held && (record.state !== "finished" || step(record) !== held.step)) failing.delete(record.id);
+    else if (held && (held.failures >= WATCH_ATTEMPTS || Date.now() < held.retryAt)) return record;
+    const next = await engine.status(record.id);
+    if (next.state !== "finished" || settled(next)) failing.delete(record.id);
+    else {
+      // The run ended and something is left: the collection or the publication failed in this call.
+      const failures = (failing.get(record.id)?.step === step(next) ? failing.get(record.id)!.failures : 0) + 1;
+      failing.set(record.id, { step: step(next), failures, retryAt: Date.now() + RETRY * 2 ** (failures - 1) });
+    }
+    return next;
+  };
+  const runs = () => refresh ??= (async () => {
+    const records = await engine.list();
+    const updates: Listed[] = [];
+    for (let index = 0; index < records.length; index += 4) {
+      const batch = records.slice(index, index + 4);
+      // Each run handles its own failure, at once. The other runs of the batch can take long: one collection can take
+      // hours, and the mark and the line of a failed check must not wait for it.
+      updates.push(...await Promise.all(batch.map(async (stale): Promise<Listed> => {
+        try { const next = await refreshed(stale); unchecked.delete(stale.id); return next; }
+        catch (error) {
+          // The stored record is shown. A busy lock is normal while another command collects the run, so it is no
+          // failure and it changes nothing: a mark from an earlier check stays.
+          if ((error as NodeJS.ErrnoException)?.code !== "ELOCKED") {
+            const text = failure(stale.id, error);
+            if (!unchecked.has(stale.id)) process.stderr.write(`${text} The dashboard shows the stored record and tries again at each refresh.\n`);
+            unchecked.set(stale.id, text);
+          }
+          return marked(stale);
+        }
+      })));
+    }
+    return updates;
+  })().finally(() => { refresh = undefined; });
+
+  const server = Bun.serve({
+    hostname: "127.0.0.1", port, idleTimeout: 120,
+    async fetch(request, server) {
+      const url = new URL(request.url);
+      const allowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
+      if (!allowedHosts.has(request.headers.get("host") ?? "")) return json({ error: "Loopback host required." }, 403);
+      if (request.method !== "GET") {
+        const origin = request.headers.get("origin");
+        if (request.method !== "POST" || request.headers.get("x-ultrafuzz-client") !== "dashboard"
+          || (origin && origin !== url.origin) || !request.headers.get("content-type")?.startsWith("application/json")) {
+          return json({ error: "Same-origin dashboard request required." }, 403);
+        }
+      }
+      // Image builds, collection and publication can outlast an HTTP idle timeout.
+      if (url.pathname.startsWith("/api/")) server.timeout(request, 0);
+      try {
+        if (url.pathname === "/api/bootstrap" && request.method === "GET") {
+          const config = await loadConfig(home);
+          return json({ defaults: config.defaults, repositories: config.repositories, profiles: await listProfiles() });
+        }
+        if (url.pathname === "/api/runs" && request.method === "GET") {
+          // A refresh collects and publishes, and that can take minutes. The page must not wait for it: after a short
+          // time the answer is the stored records, and the one shared refresh continues. The stored records get the
+          // marks of the status checks that failed, so a run that cannot be checked does not look like a run that is in order.
+          const fresh = runs();
+          fresh.catch(() => undefined); // The collector timer reports a failed refresh.
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const stored = new Promise<Listed[]>((resolve, reject) => { timer = setTimeout(() => engine.list().then(records => resolve(records.map(marked)), reject), patience); });
+          return json({ runs: await Promise.race([fresh, stored]).finally(() => clearTimeout(timer)) });
+        }
+        if (url.pathname === "/api/runs" && request.method === "POST") {
+          const body = await request.json() as LaunchOptions;
+          // The form reloads config on page load, so launches must use that config too.
+          const current = await createEngine(home, executors, publisher);
+          return json({ run: await current.launch(body) }, 201);
+        }
+        const route = /^\/api\/runs\/([a-zA-Z0-9_-]+)(\/cancel|\/report)?$/.exec(url.pathname);
+        if (route && request.method === "GET" && !route[2]) return json({ run: await engine.status(route[1]!) });
+        if (route && request.method === "POST" && route[2] === "/cancel") return json({ run: await engine.cancel(route[1]!) });
+        if (route && request.method === "GET" && route[2] === "/report") {
+          // The path is rebuilt from the validated run ID, never taken from a stored record.
+          validateRunId(route[1]!);
+          const report = Bun.file(join(resolve(home), "runs", route[1]!, "artifacts/raw/report.md"));
+          if (await report.exists()) return new Response(report, { headers: { ...headers, "Content-Type": "text/plain; charset=utf-8" } });
+          return json({ error: "This run has no collected report." }, 404);
+        }
+        if (request.method === "GET" && assets[url.pathname]) {
+          const file = Bun.file(resolve(webRoot, assets[url.pathname]!));
+          if (await file.exists()) return new Response(file, { headers });
+        }
+        return json({ error: "Not found." }, 404);
+      } catch (error) {
+        // A run that the registry does not have is "not found", not a bad request.
+        const unknown = url.pathname.startsWith("/api/runs/") && (error as NodeJS.ErrnoException)?.code === "ENOENT";
+        return json({ error: error instanceof Error ? error.message : String(error) }, unknown ? 404 : 400);
+      }
+    },
+  });
+  const collector = setInterval(() => {
+    void runs().catch(() => process.stderr.write("Ultrafuzz dashboard could not refresh the run registry.\n"));
+  }, 5000);
+  process.stderr.write(`Ultrafuzz dashboard: http://127.0.0.1:${server.port}\n`);
+  const stop = () => { clearInterval(collector); process.off("SIGINT", stop); process.off("SIGTERM", stop); void server.stop(true); };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  return stop;
+}

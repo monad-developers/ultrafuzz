@@ -1,0 +1,33 @@
+# Specify the protocol's properties with collaborating lenses
+
+Use the installed `property-specification-collaborative` skill. It is in the run context's `skill_directory`, at `property-specification-collaborative/SKILL.md`. Read `SKILL.md` in full before you start. The skill holds the eight lens prompts, the fan-in prompt and the list of pinned references. Do not replace its prompts with your own text.
+
+You are the coordinating session. Your job is to run the workflow, not to write the properties yourself. Eight lenses study the supplied source within the scope, each from a different angle. A fan-in then merges their catalogs into one report.
+
+## Working files
+
+Create a `collaborative` directory in the output directory. Keep every working file there: the copy of the run context, your progress notes, the target context, the shared log, the lens catalogs, the lens list and the draft report. The skill gives the exact file names.
+
+Do not change files in the workspace. The lenses read the same checkout.
+
+## Run
+
+Follow the steps of `SKILL.md` in order:
+
+1. Prepare the directory, save the run context as `collaborative/run-context.json` and start `collaborative/progress.md`.
+2. Write `collaborative/target-context.md`.
+3. Create the shared log, `collaborative/shared-log.md`.
+4. Run every lens. If your harness has a tool that starts subagents, run each lens as one subagent, and give it the task message from the skill. If it has no such tool, run the lenses yourself, one after another, in this session. Each lens reads the shared log when it starts, writes its catalog to `collaborative/properties/`, and appends a closing entry to the shared log when it finishes.
+5. Write the lens list, `collaborative/lenses.md`.
+6. Run the fan-in. It writes `collaborative/report-draft.md`.
+7. Check the draft, then copy it to `report.md` in the output directory.
+
+Run all eight lenses. Run a failed lens one more time, then record it as missing and continue. Lenses and the fan-in must not start further subagents.
+
+If you are told to continue after a stop, read `collaborative/progress.md` and the files on disk. Run only the steps and the lenses whose results are absent.
+
+## Deliverable
+
+The only deliverable is `report.md` in the output directory. It is the property specification. Each property has a stable identifier (`P-001`, `P-002`, and so on), a description, a category, a priority and the lens rows that it came from. Do not create `properties.md` or `properties.json`.
+
+Do not write `report.md` before the fan-in has finished and you have checked its draft. If a lens is missing, a reference was unavailable or a check failed, state it in a `Completion status` section at the top of the report. A listed property is specified, not proved.

@@ -1,0 +1,27 @@
+# Run the Pareto v2 security review
+
+Use the installed `pareto-security-review` skill. It is in the run context's `skill_directory`, at `pareto-security-review/SKILL.md`. Read `SKILL.md` and `references/runtime.md` in full before you start. The skill contains the role prompts, the configuration and the Python tools for the whole workflow. Do not replace its prompts with your own text.
+
+You are the coordinating session. Hunters, mergers, verifiers and appeal reviewers are native subagents that you start. Give each one its complete rendered task prompt. They must not start further subagents.
+
+## Configuration
+
+Create a `pareto` directory in the output directory. Copy the skill's `config.toml` to `pareto/review.toml` and fill its `[target]` section from the run context:
+
+- `repository` and `revision`: the context's `repository` and `commit`. Use the full commit ID.
+- `workspace`: the context's `workspace`.
+- `scope`: the context's `scope`, as workspace-relative paths. If the context gives the entire repository, list the Solidity source directories that the project deploys. Exclude tests, scripts, mocks and vendored dependencies.
+- `project`: the project's name from its documentation.
+- `threat_model`: if the run context lists an input named `threat-model`, use its text unchanged. Otherwise, write a threat model from the project's documentation: the actors, the trusted roles, the external dependencies and what is out of scope. Save it as `pareto/threat-model.md`, and state in the report that you derived it.
+
+Keep the `[workflow]` values. In `[runtime]`, set `review_timeout_seconds`, `task_timeout_seconds` and `sandbox_timeout_seconds` to the context's `timeout_seconds` when the packaged value is larger. Keep the other requested values. Record the actual harness, model, reasoning effort, CPU count, memory and time limit in `effective-runtime.json`, as the skill describes. Do not claim a setting that the host did not apply.
+
+An input named `prior-reports` holds earlier audit reports. Add its files to `[references]` and apply the skill's reference policy. Without that input, keep `[references]` as packaged: no prior reports and no search.
+
+## Run
+
+Prepare the run with `--out` set to the `pareto` directory. Then follow the rendered coordinator prompt through the hunt, merge, verify, appeal and assembly stages. Use the Python tools in the skill's `scripts` directory to render tasks, check coverage, split shards and assemble reports. Do not do those steps by hand.
+
+## Deliverable
+
+Final assembly writes `pareto/report.md` and `pareto/report.md.status.json`. Read the status file first. Then copy `pareto/report.md` to `report.md` in the output directory. If the status is not complete and the retry limit is used, copy the report anyway, and put the completion status and the list of missing work at its top. Do not write `report.md` in the output directory before final assembly.

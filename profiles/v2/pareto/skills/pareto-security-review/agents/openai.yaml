@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pareto Security Review"
+  short_description: "Run configurable Pareto Solidity security reviews"
+  default_prompt: "Use $pareto-security-review to review the agreed project snapshot with the configured scope, threat model and execution limits."
